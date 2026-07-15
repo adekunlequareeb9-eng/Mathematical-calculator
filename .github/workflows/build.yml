@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -15,26 +15,14 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip git zip unzip openjdk-17-jdk android-sdk
+          sudo apt install -y python3-pip git zip unzip openjdk-17-jdk
 
       - name: Install Buildozer
         run: |
-          pip3 install --user buildozer cython
-
-      - name: Accept Android licenses
-        run: |
-          yes | sdkmanager --licenses || true
-
-      - name: Install Android tools
-        run: |
-          ls $ANDROID_HOME/cmdline-tools
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;35.0.0" "platforms;android-35"
+          pip3 install --user buildozer cython==0.29.36
 
       - name: Build APK
         run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/tools/bin
-          ln -s $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager ~/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager
           ~/.local/bin/buildozer android debug
 
       - name: Upload APK
@@ -42,4 +30,3 @@ jobs:
         with:
           name: Mathematical-Calculator-APK
           path: bin/*.apk
-
