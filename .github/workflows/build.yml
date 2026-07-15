@@ -15,14 +15,19 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip git zip unzip openjdk-17-jdk wget
+          sudo apt install -y python3-pip git zip unzip openjdk-17-jdk android-sdk
+
       - name: Install Buildozer
         run: |
           pip3 install --user buildozer cython
 
-      - name: Build APK
+      - name: Accept Android licenses
         run: |
-          yes | ~/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager --licenses || true
+          yes | sdkmanager --licenses || true
+
+      - name: Install Android tools
+        run: |
+          sdkmanager "build-tools;35.0.0" "platforms;android-35"
 
       - name: Build APK
         run: |
@@ -33,4 +38,3 @@ jobs:
         with:
           name: Mathematical-Calculator-APK
           path: bin/*.apk
-
