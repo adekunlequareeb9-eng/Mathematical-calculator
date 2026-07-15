@@ -190,6 +190,11 @@ class Calculator(BoxLayout):
     def button_pressed(self, button):
         value = button.text
 
+        if self.display.text in ("Math Error", "Cannot divide by zero"):
+            if value not in ("C", "⌫"):
+                self.expression = ""
+                self.display.text = "0"
+
         if value == "C":
             self.expression = ""
             self.display.text = "0"
@@ -259,7 +264,7 @@ class Calculator(BoxLayout):
                 result = round(result, 10)
 
             self.history.append((original, result))
-            self.history = self.history[-3:]
+            self.history = self.history[-50:]
 
             self.expression = str(result)
             self.display.text = str(result)
