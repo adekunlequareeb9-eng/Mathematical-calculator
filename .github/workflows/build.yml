@@ -27,7 +27,9 @@ jobs:
 
       - name: Install Android tools
         run: |
-          sdkmanager "build-tools;35.0.0" "platforms;android-35"
+          ls $ANDROID_HOME/cmdline-tools
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;35.0.0" "platforms;android-35"
 
       - name: Build APK
         run: |
@@ -38,3 +40,4 @@ jobs:
         with:
           name: Mathematical-Calculator-APK
           path: bin/*.apk
+
