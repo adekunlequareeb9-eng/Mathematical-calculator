@@ -12,14 +12,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip git zip unzip openjdk-17-jdk
+
+      - name: Install Buildozer
+        run: |
+          pip3 install --user buildozer cython
+
       - name: Build APK
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
-        with:
-          buildozer_version: stable
+        run: |
+          ~/.local/bin/buildozer android debug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Mathematical-Calculator-APK
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
