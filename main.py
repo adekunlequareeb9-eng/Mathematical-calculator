@@ -10,6 +10,9 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
+from kivy.uix.popup import Popup
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.textinput import TextInput
 
 
 Window.clearcolor = (0.04, 0.04, 0.06, 1)
@@ -210,7 +213,30 @@ class Calculator(BoxLayout):
             return
 
         if value == "HIST":
-            self.history_label.text = "History feature coming soon..."
+            history_text = "\n".join(
+                f"{expression} = {answer}"
+                for expression, answer in
+        self.history
+            )
+
+            if not history_text:
+                history_text = "No history yet."
+
+            history_box = TextInput(
+                text=history_text,
+                readonly=True,
+                multiline=True,
+            )
+
+            scroll = ScrollView()
+            scroll.add_widget(history_box)
+
+            Popup(
+                title="Calculation History",
+                content=scroll,
+                size_hint=(0.9, 0.8),
+            ).open()
+
             return
 
         if value == "ANS":
