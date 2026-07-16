@@ -111,16 +111,16 @@ class Calculator(BoxLayout):
 
         title = Label(
             text="MATHEMATICAL CALCULATOR",
-            size_hint_y=0.08,
-            font_size="20sp",
+            size_hint_y=0.07,
+            font_size="22sp",
             bold=True,
         )
         self.add_widget(title)
 
         self.history_label = Label(
             text="History will appear here",
-            size_hint_y=0.12,
-            font_size="14sp",
+            size_hint_y=0.10,
+            font_size="12sp",
             halign="right",
             valign="middle",
         )
@@ -129,8 +129,8 @@ class Calculator(BoxLayout):
 
         self.display = Label(
             text="0",
-            size_hint_y=0.18,
-            font_size="32sp",
+            size_hint_y=0.22,
+            font_size="40sp",
             halign="right",
             valign="middle",
         )
@@ -143,7 +143,7 @@ class Calculator(BoxLayout):
             ["log", "ln", "π", "e", "!"],
             ["7", "8", "9", "%", "×"],
             ["4", "5", "6", ".", "-"],
-            ["1", "2", "3", "COPY", "+"],
+            ["1", "2", "3", "HIST", "+"],
             ["0", "00", "ANS", "±", "="],
         ]
 
@@ -209,9 +209,8 @@ class Calculator(BoxLayout):
             self.calculate()
             return
 
-        if value == "COPY":
-            Clipboard.copy(self.display.text)
-            self.history_label.text = "Result copied"
+        if value == "HIST":
+            self.history_label.text = "History feature coming soon..."
             return
 
         if value == "ANS":
