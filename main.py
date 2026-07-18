@@ -111,6 +111,7 @@ class Calculator(BoxLayout):
         self.expression = ""
         self.engine = MathEngine()
         self.history = []
+        self.just_calculated = False
 
         title = Label(
             text="MATHEMATICAL CALCULATOR",
@@ -201,10 +202,12 @@ class Calculator(BoxLayout):
         if value == "C":
             self.expression = ""
             self.display.text = "0"
+            self.just_calculated = False
             return
 
         if value == "⌫":
             self.expression = self.expression[:-1]
+            self.just_calculated = False
             self.update_display()
             return
 
@@ -231,11 +234,30 @@ class Calculator(BoxLayout):
             scroll = ScrollView()
             scroll.add_widget(history_box)
 
-            Popup(
+            popup_layout = BoxLayout(
+                orientation="vertical",
+                spacing=dp(5),
+            )
+
+            popup_layout.add_widget(scroll)
+
+            close_button = Button(
+                text="Close",
+                size_hint_y=None,
+                height=dp(45),
+            )
+
+            popup = Popup(
                 title="Calculation History",
-                content=scroll,
+                content=popup_layout,
                 size_hint=(0.9, 0.8),
-            ).open()
+            )
+
+            close_button.bind(on_press=popup.dismiss)
+
+            popup_layout.add_widget(close_button)
+
+            popup.open()
 
             return
 
@@ -267,7 +289,11 @@ class Calculator(BoxLayout):
         elif value in replacements:
             self.expression += replacements[value]
         else:
-            self.expression += value
+            if getattr(self, "just_calculated", False) and (value.isdigit() or value == "."):
+                self.expression = value
+                self.just_calculated = False
+            else:
+                self.expression += value
 
         self.update_display()
 
@@ -293,6 +319,7 @@ class Calculator(BoxLayout):
 
             self.expression = str(result)
             self.display.text = str(result)
+            self.just_calculated = True
 
             history_text = "\n".join(
                 f"{expression} = {answer}"
