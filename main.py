@@ -121,8 +121,36 @@ class Calculator(BoxLayout):
         )
         self.add_widget(title)
 
+        version_bar = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=0.04,
+            spacing=dp(5),
+        )
+
+        version = Label(
+            text="Version 1.4",
+            font_size="12sp",
+            halign="left",
+            valign="middle",
+        )
+
+        version.bind(size=self.update_text_size)
+
+        info_button = Button(
+            text="i",
+            size_hint=(None, 1),
+            width=dp(35),
+        )
+
+        info_button.bind(on_press=self.show_about)
+
+        version_bar.add_widget(version)
+        version_bar.add_widget(info_button)
+
+        self.add_widget(version_bar)
+
         self.history_label = Label(
-            text="History will appear here",
+            text="Welcome.\n\nLet's calculate something.",
             size_hint_y=0.10,
             font_size="12sp",
             halign="right",
@@ -169,6 +197,45 @@ class Calculator(BoxLayout):
                 grid.add_widget(button)
 
         self.add_widget(grid)
+
+    def show_about(self, instance):
+        layout = BoxLayout(
+        orientation="vertical",
+        spacing=dp(10),
+        padding=dp(10),
+        )
+
+        about_label = Label(
+            text=(
+                "MATHEMATICAL CALCULATOR\n\n"
+                "Version 1.4\n\n"
+                "Created by Quareeb\n\n"
+                "Thank you for using this calculator!"
+        ),
+            halign="center",
+            valign="middle",
+        )
+
+        about_label.bind(size=self.update_text_size)
+
+        close_button = Button(
+            text="Close",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        layout.add_widget(about_label)
+        layout.add_widget(close_button)
+
+        popup = Popup(
+                title="About",
+                content=layout,
+                size_hint=(0.8, 0.5),
+        )
+
+        close_button.bind(on_press=popup.dismiss)
+        popup.open()
+
 
     def update_text_size(self, widget, size):
         widget.text_size = size
