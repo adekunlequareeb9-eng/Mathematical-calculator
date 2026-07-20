@@ -1,0 +1,331 @@
+[1mdiff --git a/main.py b/main.py[m
+[1mindex 4867f25..5508e7e 100644[m
+[1m--- a/main.py[m
+[1m+++ b/main.py[m
+[36m@@ -109,6 +109,7 @@[m [mclass Calculator(BoxLayout):[m
+         self.spacing = dp(6)[m
+ [m
+         self.expression = ""[m
+[32m+[m[32m        self.memory = 0[m
+         self.engine = MathEngine()[m
+         self.history = [][m
+         self.just_calculated = False[m
+[36m@@ -159,6 +160,17 @@[m [mclass Calculator(BoxLayout):[m
+         self.history_label.bind(size=self.update_text_size)[m
+         self.add_widget(self.history_label)[m
+ [m
+[32m+[m[32m        self.memory_indicator = Label([m
+[32m+[m[32m            text="",[m
+[32m+[m[32m            size_hint_y=0.05,[m
+[32m+[m[32m            font_size="12sp",[m
+[32m+[m[32m            halign="right",[m
+[32m+[m[32m            valign="middle",[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        self.memory_indicator.bind(size=self.update_text_size)[m
+[32m+[m[32m        self.add_widget(self.memory_indicator)[m
+[32m+[m
+         self.display = Label([m
+             text="0",[m
+             size_hint_y=0.22,[m
+[36m@@ -170,13 +182,11 @@[m [mclass Calculator(BoxLayout):[m
+         self.add_widget(self.display)[m
+ [m
+         buttons = [[m
+[31m-            ["C", "⌫", "(", ")", "÷"],[m
+[31m-            ["sin", "cos", "tan", "√", "^"],[m
+[31m-            ["log", "ln", "π", "e", "!"],[m
+[31m-            ["7", "8", "9", "%", "×"],[m
+[31m-            ["4", "5", "6", ".", "-"],[m
+[31m-            ["1", "2", "3", "HIST", "+"],[m
+[31m-            ["0", "00", "ANS", "±", "="],[m
+[32m+[m[32m            ["C", "⌫", "(", ")", "More"],[m
+[32m+[m[32m            ["7", "8", "9", "%", "÷"],[m
+[32m+[m[32m            ["4", "5", "6", ".", "×"],[m
+[32m+[m[32m            ["1", "2", "3", "HIST", "-"],[m
+[32m+[m[32m            ["0", "±", "", "=", "+"],[m
+         ][m
+ [m
+         grid = GridLayout([m
+[36m@@ -187,14 +197,20 @@[m [mclass Calculator(BoxLayout):[m
+ [m
+         for row in buttons:[m
+             for text in row:[m
+[31m-                button = Button([m
+[31m-                    text=text,[m
+[31m-                    font_size="18sp",[m
+[31m-                    background_normal="",[m
+[31m-                    background_color=self.button_color(text),[m
+[31m-                )[m
+[31m-                button.bind(on_press=self.button_pressed)[m
+[31m-                grid.add_widget(button)[m
+[32m+[m[32m                if text == "":[m
+[32m+[m[32m                   grid.add_widget(Label())[m
+[32m+[m[32m                   continue[m
+[32m+[m
+[32m+[m[32m            button = Button([m
+[32m+[m[32m                text=text,[m
+[32m+[m[32m                font_size="18sp",[m
+[32m+[m[32m                background_normal="",[m
+[32m+[m
+[32m+[m[32m        background_color=self.button_color(text),[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m        button.bind(on_press=self.button_pressed)[m
+[32m+[m[32m        grid.add_widget(button)[m
+ [m
+         self.add_widget(grid)[m
+ [m
+[36m@@ -236,6 +252,128 @@[m [mclass Calculator(BoxLayout):[m
+         close_button.bind(on_press=popup.dismiss)[m
+         popup.open()[m
+ [m
+[32m+[m[32m    def show_scientific(self, instance):[m
+[32m+[m[32m        layout = BoxLayout([m
+[32m+[m[32m            orientation="vertical",[m
+[32m+[m[32m            spacing=dp(10),[m
+[32m+[m[32m            padding=dp(10),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        grid = GridLayout([m
+[32m+[m[32m            cols=3,[m
+[32m+[m[32m            spacing=dp(5),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        buttons = [[m
+[32m+[m[32m            "sin", "cos", "tan",[m
+[32m+[m[32m            "log", "ln", "√",[m
+[32m+[m[32m            "^", "!", "%",[m
+[32m+[m[32m            "π", "e", "()",[m
+[32m+[m[32m        ][m
+[32m+[m
+[32m+[m[32m        for text in buttons:[m
+[32m+[m[32m            button = Button([m
+[32m+[m[32m            text=text,[m
+[32m+[m[32m            font_size="18sp",[m
+[32m+[m[32m            background_normal="",[m
+[32m+[m
+[32m+[m[32m        background_color=self.button_color(text),[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m        button.bind(on_press=self.scientific_button_pressed)[m
+[32m+[m
+[32m+[m[32m        grid.add_widget(button)[m
+[32m+[m
+[32m+[m[32m        layout.add_widget(grid)[m
+[32m+[m
+[32m+[m[32m        close_button = Button([m
+[32m+[m[32m            text="Close",[m
+[32m+[m[32m            size_hint_y=None,[m
+[32m+[m[32m            height=dp(45),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        layout.add_widget(close_button)[m
+[32m+[m
+[32m+[m[32m        popup = Popup([m
+[32m+[m[32m            title="Scientific",[m
+[32m+[m[32m            content=layout,[m
+[32m+[m[32m            size_hint=(0.9, 0.7),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        close_button.bind(on_press=popup.dismiss)[m
+[32m+[m
+[32m+[m[32m        popup.open()[m
+[32m+[m
+[32m+[m[32m    def scientific_button_pressed(self, button):[m
+[32m+[m[32m        text = button.text[m
+[32m+[m
+[32m+[m[32m    def show_memory(self, instance):[m
+[32m+[m[32m        layout = BoxLayout([m
+[32m+[m[32m            orientation="vertical",[m
+[32m+[m[32m            spacing=dp(10),[m
+[32m+[m[32m            padding=dp(10),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        memory_label = Label([m
+[32m+[m[32m            text=f"Stored Memory: {self.memory}",[m
+[32m+[m[32m            size_hint_y=None,[m
+[32m+[m[32m            height=dp(40),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        self.memory_label = memory_label[m
+[32m+[m
+[32m+[m[32m        layout.add_widget(memory_label)[m
+[32m+[m
+[32m+[m[32m        mc = Button(text="MC")[m
+[32m+[m[32m        mr = Button(text="MR")[m
+[32m+[m[32m        mp = Button(text="M+")[m
+[32m+[m[32m        mm = Button(text="M-")[m
+[32m+[m[32m        close = Button([m
+[32m+[m[32m            text="Close",[m
+[32m+[m[32m            size_hint_y=None,[m
+[32m+[m[32m            height=dp(45),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        layout.add_widget(mc)[m
+[32m+[m[32m        layout.add_widget(mr)[m
+[32m+[m[32m        layout.add_widget(mp)[m
+[32m+[m[32m        layout.add_widget(mm)[m
+[32m+[m[32m        layout.add_widget(close)[m
+[32m+[m
+[32m+[m[32m        popup = Popup([m
+[32m+[m[32m            title="Memory",[m
+[32m+[m[32m            content=layout,[m
+[32m+[m[32m            size_hint=(0.7, 0.6),[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        mc.bind(on_press=lambda x: self.memory_clear())[m
+[32m+[m[32m        mr.bind(on_press=lambda x: self.memory_recall())[m
+[32m+[m[32m        mp.bind(on_press=lambda x: self.memory_add())[m
+[32m+[m[32m        mm.bind(on_press=lambda x: self.memory_subtract())[m
+[32m+[m[32m        close.bind(on_press=popup.dismiss)[m
+[32m+[m
+[32m+[m[32m        popup.open()[m
+[32m+[m
+[32m+[m[32m    def button_pressed(self, button):[m
+[32m+[m[32m        value = button.text[m
+[32m+[m
+[32m+[m[32m        replacements = {[m
+[32m+[m[32m            "sin": "sin(",[m
+[32m+[m[32m            "cos": "cos(",[m
+[32m+[m[32m            "tan": "tan(",[m
+[32m+[m[32m            "log": "log(",[m
+[32m+[m[32m            "ln": "ln(",[m
+[32m+[m[32m            "√": "sqrt(",[m
+[32m+[m[32m            "^": "^",[m
+[32m+[m[32m            "!": "!",[m
+[32m+[m[32m            "%": "%",[m
+[32m+[m[32m            "π": "π",[m
+[32m+[m[32m            "e": "e",[m
+[32m+[m[32m            "()": "()",[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m    self.expression += replacements.get(text, text)[m
+[32m+[m[32m    self.update_display()[m
+ [m
+     def update_text_size(self, widget, size):[m
+         widget.text_size = size[m
+[36m@@ -282,6 +420,22 @@[m [mclass Calculator(BoxLayout):[m
+             self.calculate()[m
+             return[m
+ [m
+[32m+[m[32m        if value == "MC":[m
+[32m+[m[32m            self.memory_clear()[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        if value == "MR":[m
+[32m+[m[32m            self.memory_recall()[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        if value == "M+":[m
+[32m+[m[32m            self.memory_add()[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        if value == "M-":[m
+[32m+[m[32m            self.memory_subtract()[m
+[32m+[m[32m            return[m
+[32m+[m
+         if value == "HIST":[m
+             history_text = "\n".join([m
+                 f"{expression} = {answer}"[m
+[36m@@ -314,18 +468,50 @@[m [mclass Calculator(BoxLayout):[m
+                 height=dp(45),[m
+             )[m
+ [m
+[32m+[m[32m            clear_button = Button([m
+[32m+[m[32m                text="Clear History",[m
+[32m+[m[32m                size_hint_y=None,[m
+[32m+[m[32m                height=dp(45),[m
+[32m+[m[32m            )[m
+[32m+[m
+             popup = Popup([m
+                 title="Calculation History",[m
+                 content=popup_layout,[m
+                 size_hint=(0.9, 0.8),[m
+             )[m
+ [m
+[31m-            close_button.bind(on_press=popup.dismiss)[m
+[32m+[m[32m    def show_more_menu(self, value):[m
+[32m+[m[32m        if value == "More":[m
+[32m+[m[32m            layout = BoxLayout([m
+[32m+[m[32m                orientation="vertical",[m
+[32m+[m[32m                spacing=dp(10),[m
+[32m+[m[32m                padding=dp(10),[m
+[32m+[m[32m            )[m
+ [m
+[31m-            popup_layout.add_widget(close_button)[m
+[32m+[m[32m            scientific = Button(text="🧮 Scientific")[m
+[32m+[m[32m            memory = Button(text="💾 Memory")[m
+[32m+[m[32m            memory.bind(on_press=self.show_memory)[m
+[32m+[m[32m            history = Button(text="📜 History")[m
+[32m+[m[32m            close = Button([m
+[32m+[m[32m                text="Close",[m
+[32m+[m[32m                size_hint_y=None,[m
+[32m+[m[32m                height=dp(45),[m
+[32m+[m[32m            )[m
+ [m
+[31m-            popup.open()[m
+[32m+[m[32m            layout.add_widget(scientific)[m
+[32m+[m[32m            layout.add_widget(memory)[m
+[32m+[m[32m            layout.add_widget(history)[m
+[32m+[m[32m            layout.add_widget(close)[m
+ [m
+[32m+[m[32m            popup = Popup([m
+[32m+[m[32m                title="More",[m
+[32m+[m[32m                content=layout,[m
+[32m+[m[32m                size_hint=(0.8, 0.6),[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            close.bind(on_press=popup.dismiss)[m
+[32m+[m
+[32m+[m[32m            popup.open()[m
+             return[m
+ [m
+         if value == "ANS":[m
+[36m@@ -367,6 +553,46 @@[m [mclass Calculator(BoxLayout):[m
+     def update_display(self):[m
+         self.display.text = self.expression or "0"[m
+ [m
+[32m+[m[32m    def update_memory_label(self):[m
+[32m+[m[32m        if hasattr(self, "memory_label"):[m
+[32m+[m[32m            self.memory_label.text=f"Stored Memory: {self.format_number(self.memory)}",[m
+[32m+[m
+[32m+[m[32m    def update_memory_indicator(self):[m
+[32m+[m[32m        if self.memory != 0:[m
+[32m+[m[32m            self.memory_indicator.text = "M"[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            self.memory_indicator.text = ""[m
+[32m+[m
+[32m+[m[32m    def memory_clear(self):[m
+[32m+[m[32m        self.memory = 0[m
+[32m+[m[32m        self.update_memory_label()[m
+[32m+[m[32m        self.update_memory_indicator()[m
+[32m+[m
+[32m+[m[32m    def memory_recall(self):[m
+[32m+[m[32m        self.expression += str(self.memory)[m
+[32m+[m[32m        self.update_display()[m
+[32m+[m
+[32m+[m[32m    def memory_add(self):[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            self.memory += float(self.display.text)[m
+[32m+[m[32m            self.update_memory_label()[m
+[32m+[m[32m        except:[m
+[32m+[m[32m            pass[m
+[32m+[m[32m        self.update_memory_indicator()[m
+[32m+[m
+[32m+[m[32m    def memory_subtract(self):[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            self.memory -= float(self.display.text)[m
+[32m+[m[32m            self.update_memory_label()[m
+[32m+[m[32m        except:[m
+[32m+[m[32m            pass[m
+[32m+[m[32m        self.update_memory_indicator()[m
+[32m+[m
+[32m+[m[32m    def format_number(self, number):[m
+[32m+[m[32m        if isinstance(number, float) and number.is_integer():[m
+[32m+[m[32m            return str(int(number))[m
+[32m+[m[32m        return str(number)[m
+[32m+[m
+     def calculate(self):[m
+         if not self.expression:[m
+             return[m

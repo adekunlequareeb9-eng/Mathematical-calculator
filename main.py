@@ -109,6 +109,7 @@ class Calculator(BoxLayout):
         self.spacing = dp(6)
 
         self.expression = ""
+        self.memory = 0
         self.engine = MathEngine()
         self.history = []
         self.just_calculated = False
@@ -159,6 +160,17 @@ class Calculator(BoxLayout):
         self.history_label.bind(size=self.update_text_size)
         self.add_widget(self.history_label)
 
+        self.memory_indicator = Label(
+            text="",
+            size_hint_y=0.05,
+            font_size="12sp",
+            halign="right",
+            valign="middle",
+        )
+
+        self.memory_indicator.bind(size=self.update_text_size)
+        self.add_widget(self.memory_indicator)
+
         self.display = Label(
             text="0",
             size_hint_y=0.22,
@@ -170,13 +182,11 @@ class Calculator(BoxLayout):
         self.add_widget(self.display)
 
         buttons = [
-            ["C", "⌫", "(", ")", "÷"],
-            ["sin", "cos", "tan", "√", "^"],
-            ["log", "ln", "π", "e", "!"],
-            ["7", "8", "9", "%", "×"],
-            ["4", "5", "6", ".", "-"],
-            ["1", "2", "3", "HIST", "+"],
-            ["0", "00", "ANS", "±", "="],
+            ["C", "⌫", "(", ")", "More"],
+            ["7", "8", "9", "%", "÷"],
+            ["4", "5", "6", ".", "×"],
+            ["1", "2", "3", "HIST", "-"],
+            ["0", "±", "", "=", "+"],
         ]
 
         grid = GridLayout(
@@ -187,14 +197,20 @@ class Calculator(BoxLayout):
 
         for row in buttons:
             for text in row:
-                button = Button(
-                    text=text,
-                    font_size="18sp",
-                    background_normal="",
-                    background_color=self.button_color(text),
-                )
-                button.bind(on_press=self.button_pressed)
-                grid.add_widget(button)
+                if text == "":
+                   grid.add_widget(Label())
+                   continue
+
+            button = Button(
+                text=text,
+                font_size="18sp",
+                background_normal="",
+
+        background_color=self.button_color(text),
+            )
+
+        button.bind(on_press=self.button_pressed)
+        grid.add_widget(button)
 
         self.add_widget(grid)
 
@@ -236,6 +252,128 @@ class Calculator(BoxLayout):
         close_button.bind(on_press=popup.dismiss)
         popup.open()
 
+    def show_scientific(self, instance):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(10),
+            padding=dp(10),
+        )
+
+        grid = GridLayout(
+            cols=3,
+            spacing=dp(5),
+        )
+
+        buttons = [
+            "sin", "cos", "tan",
+            "log", "ln", "√",
+            "^", "!", "%",
+            "π", "e", "()",
+        ]
+
+        for text in buttons:
+            button = Button(
+            text=text,
+            font_size="18sp",
+            background_normal="",
+
+        background_color=self.button_color(text),
+            )
+
+        button.bind(on_press=self.scientific_button_pressed)
+
+        grid.add_widget(button)
+
+        layout.add_widget(grid)
+
+        close_button = Button(
+            text="Close",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        layout.add_widget(close_button)
+
+        popup = Popup(
+            title="Scientific",
+            content=layout,
+            size_hint=(0.9, 0.7),
+        )
+
+        close_button.bind(on_press=popup.dismiss)
+
+        popup.open()
+
+    def scientific_button_pressed(self, button):
+        text = button.text
+
+    def show_memory(self, instance):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(10),
+            padding=dp(10),
+        )
+
+        memory_label = Label(
+            text=f"Stored Memory: {self.memory}",
+            size_hint_y=None,
+            height=dp(40),
+        )
+
+        self.memory_label = memory_label
+
+        layout.add_widget(memory_label)
+
+        mc = Button(text="MC")
+        mr = Button(text="MR")
+        mp = Button(text="M+")
+        mm = Button(text="M-")
+        close = Button(
+            text="Close",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        layout.add_widget(mc)
+        layout.add_widget(mr)
+        layout.add_widget(mp)
+        layout.add_widget(mm)
+        layout.add_widget(close)
+
+        popup = Popup(
+            title="Memory",
+            content=layout,
+            size_hint=(0.7, 0.6),
+        )
+
+        mc.bind(on_press=lambda x: self.memory_clear())
+        mr.bind(on_press=lambda x: self.memory_recall())
+        mp.bind(on_press=lambda x: self.memory_add())
+        mm.bind(on_press=lambda x: self.memory_subtract())
+        close.bind(on_press=popup.dismiss)
+
+        popup.open()
+
+    def button_pressed(self, button):
+        value = button.text
+
+        replacements = {
+            "sin": "sin(",
+            "cos": "cos(",
+            "tan": "tan(",
+            "log": "log(",
+            "ln": "ln(",
+            "√": "sqrt(",
+            "^": "^",
+            "!": "!",
+            "%": "%",
+            "π": "π",
+            "e": "e",
+            "()": "()",
+        }
+
+    self.expression += replacements.get(text, text)
+    self.update_display()
 
     def update_text_size(self, widget, size):
         widget.text_size = size
@@ -282,12 +420,25 @@ class Calculator(BoxLayout):
             self.calculate()
             return
 
+        if value == "MC":
+            self.memory_clear()
+            return
+
+        if value == "MR":
+            self.memory_recall()
+            return
+
+        if value == "M+":
+            self.memory_add()
+            return
+
+        if value == "M-":
+            self.memory_subtract()
+            return
+
         if value == "HIST":
-            history_text = "\n".join(
-                f"{expression} = {answer}"
-                for expression, answer in
-        self.history
-            )
+            self.show_history(instance)
+            return
 
             if not history_text:
                 history_text = "No history yet."
@@ -314,18 +465,106 @@ class Calculator(BoxLayout):
                 height=dp(45),
             )
 
+            clear_button = Button(
+                text="Clear History",
+                size_hint_y=None,
+                height=dp(45),
+            )
+
             popup = Popup(
                 title="Calculation History",
                 content=popup_layout,
                 size_hint=(0.9, 0.8),
             )
 
-            close_button.bind(on_press=popup.dismiss)
+    def show_history(self, instance):
+        history_text = "\n".join(
+            f"{expression} = {answer}"
+            for expression, answer in self.history
+        )
 
-            popup_layout.add_widget(close_button)
+        if not history_text:
+            history_text = "No history yet."
+
+        history_box = TextInput(
+            text=history_text,
+            readonly=True,
+            multiline=True,
+        )
+
+        scroll = ScrollView()
+        scroll.add_widget(history_box)
+
+        popup_layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(5),
+        )
+
+        popup_layout.add_widget(scroll)
+
+        close_button = Button(
+            text="Close",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        clear_button = Button(
+            text="Clear History",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        popup = Popup(
+            title="Calculation History",
+            content=popup_layout,
+            size_hint=(0.9, 0.8),
+        )
+
+        def clear_history(instance):
+            self.history = []
+            history_box.text = "No history yet."
+
+        clear_button.bind(on_press=clear_history)
+        close_button.bind(on_press=popup.dismiss)
+
+        popup_layout.add_widget(clear_button)
+        popup_layout.add_widget(close_button)
+
+        popup.open()
+
+    def show_more_menu(self, value):
+        if value == "More":
+            layout = BoxLayout(
+                orientation="vertical",
+                spacing=dp(10),
+                padding=dp(10),
+            )
+
+            scientific = Button(text="🧮 Scientific")
+            memory = Button(text="💾 Memory")
+            memory.bind(on_press=self.show_memory)
+            history = Button(text="📜 History")
+            history.bind(on_press=self.show_history)
+            close = Button(
+                text="Close",
+                size_hint_y=None,
+                height=dp(45),
+            )
+
+            layout.add_widget(scientific)
+            layout.add_widget(memory)
+            layout.add_widget(history)
+            layout.add_widget(close)
+
+            popup = Popup(
+                title="More",
+                content=layout,
+                size_hint=(0.8, 0.6),
+            )
+
+            close.bind(on_press=popup.dismiss)
 
             popup.open()
-
             return
 
         if value == "ANS":
@@ -366,6 +605,46 @@ class Calculator(BoxLayout):
 
     def update_display(self):
         self.display.text = self.expression or "0"
+
+    def update_memory_label(self):
+        if hasattr(self, "memory_label"):
+            self.memory_label.text=f"Stored Memory: {self.format_number(self.memory)}",
+
+    def update_memory_indicator(self):
+        if self.memory != 0:
+            self.memory_indicator.text = "M"
+        else:
+            self.memory_indicator.text = ""
+
+    def memory_clear(self):
+        self.memory = 0
+        self.update_memory_label()
+        self.update_memory_indicator()
+
+    def memory_recall(self):
+        self.expression += str(self.memory)
+        self.update_display()
+
+    def memory_add(self):
+        try:
+            self.memory += float(self.display.text)
+            self.update_memory_label()
+        except:
+            pass
+        self.update_memory_indicator()
+
+    def memory_subtract(self):
+        try:
+            self.memory -= float(self.display.text)
+            self.update_memory_label()
+        except:
+            pass
+        self.update_memory_indicator()
+
+    def format_number(self, number):
+        if isinstance(number, float) and number.is_integer():
+            return str(int(number))
+        return str(number)
 
     def calculate(self):
         if not self.expression:
