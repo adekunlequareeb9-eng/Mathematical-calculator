@@ -168,11 +168,19 @@ class Calculator(BoxLayout):
         )
         self.display.bind(size=self.update_text_size)
         self.add_widget(self.display)
+        scientific_button = Button(
+            text="Scientific",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        scientific_button.bind(on_press=self.show_scientific)
+
+        self.add_widget(scientific_button)
+
 
         buttons = [
             ["C", "⌫", "(", ")", "÷"],
-            ["sin", "cos", "tan", "√", "^"],
-            ["log", "ln", "π", "e", "!"],
             ["7", "8", "9", "%", "×"],
             ["4", "5", "6", ".", "-"],
             ["1", "2", "3", "HIST", "+"],
@@ -236,6 +244,51 @@ class Calculator(BoxLayout):
         close_button.bind(on_press=popup.dismiss)
         popup.open()
 
+    def show_scientific(self, instance):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(5),
+            padding=dp(5),
+        )
+
+        scientific_grid = GridLayout(
+            cols=5,
+            spacing=dp(5),
+        )
+
+        scientific_buttons = [
+            "sin", "cos", "tan", "√", "^",
+            "log", "ln", "π", "e", "!",
+        ]
+
+        for text in scientific_buttons:
+            button = Button(
+                text=text,
+                font_size="18sp",
+                background_normal="",
+                background_color=self.button_color(text),
+            )
+            button.bind(on_press=self.button_pressed)
+            scientific_grid.add_widget(button)
+
+        layout.add_widget(scientific_grid)
+
+        close_button = Button(
+            text="Close",
+            size_hint_y=None,
+            height=dp(45),
+        )
+
+        layout.add_widget(close_button)
+
+        popup = Popup(
+            title="Scientific Calculator",
+            content=layout,
+            size_hint=(0.9, 0.6),
+        )
+
+        close_button.bind(on_press=popup.dismiss)
+        popup.open()
 
     def update_text_size(self, widget, size):
         widget.text_size = size
