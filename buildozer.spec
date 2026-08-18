@@ -16,6 +16,7 @@ fullscreen = 0
 
 android.archs = armeabi-v7a,arm64-v8a
 android.minapi = 24
+android.python = 3.12
 
 [buildozer]
 
