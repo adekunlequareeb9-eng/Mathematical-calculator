@@ -9,7 +9,7 @@ source.include_exts = py,png,jpg,kv
 
 version = 1.0
 
-requirements = python3==3.12.13,kivy
+requirements = python3,kivy,charset-normalizer==3.3.2
 
 orientation = portrait
 fullscreen = 0
