@@ -33,6 +33,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install buildozer cython==0.29.36
 
+      - name: Cache Android debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Build APK
         env:
           PIP_CONSTRAINT: ${{ github.workspace }}/constraints.txt
