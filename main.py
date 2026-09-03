@@ -2,6 +2,7 @@ import ast
 import math
 import operator
 import re
+from fractions import Fraction
 
 from kivy.app import App
 from kivy.core.window import Window
@@ -12,6 +13,9 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
+from kivy.graphics import Color, Line
 
 
 Window.clearcolor = (0.04, 0.04, 0.06, 1)
@@ -92,7 +96,9 @@ class MathEngine:
             raise ValueError("Number too large for factorial")
         return math.factorial(int(x))
 
-    def evaluate(self, expression):
+    def evaluate(self, expression, variables=None):
+        self._variables = variables or {}
+
         expression = expression.strip()
         expression = expression.replace("×", "*")
         expression = expression.replace("÷", "/")
@@ -136,6 +142,8 @@ class MathEngine:
         if isinstance(node, ast.Name):
             if node.id in self.constants:
                 return self.constants[node.id]
+            if node.id in getattr(self, "_variables", {}):
+                return self._variables[node.id]
             raise ValueError("Unknown constant")
 
         if isinstance(node, ast.Call):
@@ -152,6 +160,469 @@ class MathEngine:
         raise ValueError("Invalid expression")
 
 
+# ----------------------------------------------------------------------
+# Number theory (Phase 3) - pure Python, no new dependencies
+# ----------------------------------------------------------------------
+
+def is_prime(n):
+    n = int(n)
+    if n < 2:
+        return False
+    if n in (2, 3):
+        return True
+    if n % 2 == 0:
+        return False
+    i = 3
+    while i * i <= n:
+        if n % i == 0:
+            return False
+        i += 2
+    return True
+
+
+def prime_factorize(n):
+    n = int(n)
+    if n < 2:
+        raise ValueError("Enter a whole number greater than 1")
+
+    factors = []
+    d = 2
+    while d * d <= n:
+        count = 0
+        while n % d == 0:
+            n //= d
+            count += 1
+        if count:
+            factors.append((d, count))
+        d += 1
+    if n > 1:
+        factors.append((n, 1))
+    return factors
+
+
+def format_prime_factors(factors):
+    return " x ".join(
+        f"{base}^{exp}" if exp > 1 else f"{base}"
+        for base, exp in factors
+    )
+
+
+def gcd_of(a, b):
+    return math.gcd(int(a), int(b))
+
+
+def lcm_of(a, b):
+    a, b = int(a), int(b)
+    if a == 0 or b == 0:
+        return 0
+    return abs(a * b) // math.gcd(a, b)
+
+
+def simplify_fraction(numerator, denominator):
+    if denominator == 0:
+        raise ZeroDivisionError("Cannot divide by zero")
+    frac = Fraction(int(numerator), int(denominator))
+    return frac.numerator, frac.denominator
+
+
+# ----------------------------------------------------------------------
+# Algebra - equation solving via numerical coefficient extraction
+# (no symbolic engine needed: we sample the user's expression at a few
+# points and fit the polynomial coefficients from those samples)
+# ----------------------------------------------------------------------
+
+def _equation_sides(equation):
+    if "=" not in equation:
+        raise ValueError("Equation must contain '='")
+    left, right = equation.split("=", 1)
+    return left.strip(), right.strip()
+
+
+def solve_linear(engine, equation):
+    left, right = _equation_sides(equation)
+
+    def f(x):
+        return engine.evaluate(f"({left})-({right})", variables={"x": x})
+
+    y0 = f(0)
+    y1 = f(1)
+    y2 = f(2)
+
+    a = y1 - y0
+    if abs((y2 - y1) - a) > 1e-6 * (abs(a) + 1):
+        raise ValueError("That doesn't look linear in x")
+
+    if abs(a) < 1e-12:
+        if abs(y0) < 1e-9:
+            raise ValueError("Infinitely many solutions (always true)")
+        raise ValueError("No solution")
+
+    return -y0 / a
+
+
+def solve_quadratic(engine, equation):
+    left, right = _equation_sides(equation)
+
+    def f(x):
+        return engine.evaluate(f"({left})-({right})", variables={"x": x})
+
+    y_m1 = f(-1)
+    y0 = f(0)
+    y1 = f(1)
+
+    coeff_a = (y1 - 2 * y0 + y_m1) / 2
+    coeff_b = (y1 - y_m1) / 2
+    coeff_c = y0
+
+    if abs(coeff_a) < 1e-9:
+        if abs(coeff_b) < 1e-12:
+            raise ValueError("No unique solution")
+        return [-coeff_c / coeff_b]
+
+    discriminant = coeff_b * coeff_b - 4 * coeff_a * coeff_c
+    if discriminant < 0:
+        raise ValueError("No real roots")
+
+    sqrt_d = math.sqrt(discriminant)
+    x1 = (-coeff_b + sqrt_d) / (2 * coeff_a)
+    x2 = (-coeff_b - sqrt_d) / (2 * coeff_a)
+    return sorted({round(x1, 10), round(x2, 10)})
+
+
+def solve_simultaneous(engine, equation1, equation2):
+    def make_f(equation):
+        left, right = _equation_sides(equation)
+
+        def f(x, y):
+            return engine.evaluate(f"({left})-({right})", variables={"x": x, "y": y})
+
+        return f
+
+    f1 = make_f(equation1)
+    f2 = make_f(equation2)
+
+    c1 = -f1(0, 0)
+    a1 = f1(1, 0) - f1(0, 0)
+    b1 = f1(0, 1) - f1(0, 0)
+
+    c2 = -f2(0, 0)
+    a2 = f2(1, 0) - f2(0, 0)
+    b2 = f2(0, 1) - f2(0, 0)
+
+    det = a1 * b2 - a2 * b1
+    if abs(det) < 1e-12:
+        raise ValueError("No unique solution (equations are parallel or identical)")
+
+    x = (c1 * b2 - c2 * b1) / det
+    y = (a1 * c2 - a2 * c1) / det
+    return x, y
+
+
+# ----------------------------------------------------------------------
+# Calculus - numerical methods (Phase 4). No symbolic engine, so results
+# are close numerical approximations rather than exact algebraic forms.
+# ----------------------------------------------------------------------
+
+def numerical_derivative(engine, expression, x0, h=1e-5):
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    return (f(x0 + h) - f(x0 - h)) / (2 * h)
+
+
+def numerical_second_derivative(engine, expression, x0, h=1e-4):
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    return (f(x0 + h) - 2 * f(x0) + f(x0 - h)) / (h * h)
+
+
+def numerical_integral(engine, expression, a, b, n=1000):
+    if n % 2 == 1:
+        n += 1
+
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    h = (b - a) / n
+    total = f(a) + f(b)
+    for i in range(1, n):
+        x = a + i * h
+        total += (4 if i % 2 == 1 else 2) * f(x)
+    return total * h / 3
+
+
+def numerical_limit(engine, expression, x0, h=1e-6):
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    left = f(x0 - h)
+    right = f(x0 + h)
+
+    if abs(left - right) > 1e-3 * (abs(left) + abs(right) + 1):
+        raise ValueError("Limit does not appear to converge from both sides")
+
+    return (left + right) / 2
+
+
+# ----------------------------------------------------------------------
+# Matrices & Vectors (Phase 5) - pure Python, Gaussian elimination etc.
+# ----------------------------------------------------------------------
+
+def parse_matrix(text):
+    text = text.strip()
+    if not text:
+        raise ValueError("Enter a matrix, e.g. 1,2;3,4")
+
+    rows = [r for r in text.split(";") if r.strip() != ""]
+    matrix = []
+    width = None
+    for row in rows:
+        values = [float(v.strip()) for v in row.split(",")]
+        if width is None:
+            width = len(values)
+        elif len(values) != width:
+            raise ValueError("Every row must have the same number of values")
+        matrix.append(values)
+    return matrix
+
+
+def matrix_add(a, b, sign=1):
+    if len(a) != len(b) or len(a[0]) != len(b[0]):
+        raise ValueError("Matrices must be the same size")
+    return [
+        [a[i][j] + sign * b[i][j] for j in range(len(a[0]))]
+        for i in range(len(a))
+    ]
+
+
+def matrix_multiply(a, b):
+    if len(a[0]) != len(b):
+        raise ValueError("Columns of A must match rows of B")
+    rows_a, cols_a, cols_b = len(a), len(a[0]), len(b[0])
+    result = [[0.0] * cols_b for _ in range(rows_a)]
+    for i in range(rows_a):
+        for j in range(cols_b):
+            result[i][j] = sum(a[i][k] * b[k][j] for k in range(cols_a))
+    return result
+
+
+def matrix_transpose(a):
+    return [list(row) for row in zip(*a)]
+
+
+def matrix_determinant(a):
+    n = len(a)
+    if any(len(row) != n for row in a):
+        raise ValueError("Determinant requires a square matrix")
+
+    if n == 1:
+        return a[0][0]
+    if n == 2:
+        return a[0][0] * a[1][1] - a[0][1] * a[1][0]
+
+    total = 0.0
+    for col in range(n):
+        minor = [row[:col] + row[col + 1:] for row in a[1:]]
+        sign = 1 if col % 2 == 0 else -1
+        total += sign * a[0][col] * matrix_determinant(minor)
+    return total
+
+
+def matrix_inverse(a):
+    n = len(a)
+    if any(len(row) != n for row in a):
+        raise ValueError("Inverse requires a square matrix")
+
+    aug = [row[:] + [1.0 if i == j else 0.0 for j in range(n)] for i, row in enumerate(a)]
+
+    for col in range(n):
+        pivot_row = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot_row][col]) < 1e-12:
+            raise ValueError("Matrix is singular (no inverse)")
+        aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+
+        pivot = aug[col][col]
+        aug[col] = [v / pivot for v in aug[col]]
+
+        for r in range(n):
+            if r != col:
+                factor = aug[r][col]
+                aug[r] = [aug[r][k] - factor * aug[col][k] for k in range(2 * n)]
+
+    return [row[n:] for row in aug]
+
+
+def matrix_rank(a):
+    m = [row[:] for row in a]
+    rows, cols = len(m), len(m[0])
+    rank = 0
+    for col in range(cols):
+        pivot_row = None
+        for r in range(rank, rows):
+            if abs(m[r][col]) > 1e-9:
+                pivot_row = r
+                break
+        if pivot_row is None:
+            continue
+        m[rank], m[pivot_row] = m[pivot_row], m[rank]
+        pivot = m[rank][col]
+        m[rank] = [v / pivot for v in m[rank]]
+        for r in range(rows):
+            if r != rank:
+                factor = m[r][col]
+                m[r] = [m[r][k] - factor * m[rank][k] for k in range(cols)]
+        rank += 1
+        if rank == rows:
+            break
+    return rank
+
+
+def format_plain_number(v):
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v)
+
+
+def format_matrix(m):
+    return "\n".join(
+        "[" + ", ".join(format_plain_number(v) for v in row) + "]"
+        for row in m
+    )
+
+
+def parse_vector(text):
+    text = text.strip()
+    if not text:
+        raise ValueError("Enter a vector, e.g. 1,2,3")
+    return [float(v.strip()) for v in text.split(",")]
+
+
+def vector_add(a, b, sign=1):
+    if len(a) != len(b):
+        raise ValueError("Vectors must be the same length")
+    return [a[i] + sign * b[i] for i in range(len(a))]
+
+
+def vector_dot(a, b):
+    if len(a) != len(b):
+        raise ValueError("Vectors must be the same length")
+    return sum(a[i] * b[i] for i in range(len(a)))
+
+
+def vector_cross(a, b):
+    if len(a) != 3 or len(b) != 3:
+        raise ValueError("Cross product requires two 3D vectors")
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def vector_magnitude(a):
+    return math.sqrt(sum(v * v for v in a))
+
+
+def vector_unit(a):
+    mag = vector_magnitude(a)
+    if mag == 0:
+        raise ValueError("Cannot normalize a zero vector")
+    return [v / mag for v in a]
+
+
+def format_vector(v):
+    return "(" + ", ".join(format_plain_number(x) for x in v) + ")"
+
+
+# ----------------------------------------------------------------------
+# Unit conversions (Phase 7) - pure Python conversion factor tables
+# ----------------------------------------------------------------------
+
+LENGTH_UNITS = {
+    "m": 1.0, "km": 1000.0, "cm": 0.01, "mm": 0.001,
+    "mile": 1609.344, "yard": 0.9144, "ft": 0.3048, "in": 0.0254,
+}
+MASS_UNITS = {
+    "kg": 1.0, "g": 0.001, "mg": 0.000001,
+    "lb": 0.45359237, "oz": 0.028349523125, "ton": 1000.0,
+}
+TIME_UNITS = {
+    "s": 1.0, "ms": 0.001, "min": 60.0, "hour": 3600.0, "day": 86400.0,
+}
+AREA_UNITS = {
+    "m2": 1.0, "km2": 1000000.0, "cm2": 0.0001, "hectare": 10000.0,
+    "acre": 4046.8564224, "sqft": 0.09290304, "sqmile": 2589988.110336,
+}
+VOLUME_UNITS = {
+    "L": 1.0, "mL": 0.001, "m3": 1000.0, "gallon": 3.785411784,
+    "quart": 0.946352946, "cup": 0.2365882365, "floz": 0.0295735295625,
+}
+SPEED_UNITS = {
+    "m/s": 1.0, "km/h": 0.277777778, "mph": 0.44704, "knot": 0.514444444,
+}
+PRESSURE_UNITS = {
+    "Pa": 1.0, "bar": 100000.0, "atm": 101325.0,
+    "psi": 6894.757293168, "mmHg": 133.322387415,
+}
+ENERGY_UNITS = {
+    "J": 1.0, "cal": 4.184, "kJ": 1000.0, "kWh": 3600000.0, "BTU": 1055.05585262,
+}
+DATA_UNITS = {
+    "byte": 1.0, "bit": 0.125,
+    "KB": 1024.0, "MB": 1024.0 ** 2, "GB": 1024.0 ** 3, "TB": 1024.0 ** 4,
+}
+ANGLE_UNITS = {
+    "deg": 1.0, "rad": 180.0 / math.pi, "grad": 0.9,
+}
+
+CONVERSION_CATEGORIES = {
+    "Length": LENGTH_UNITS,
+    "Mass": MASS_UNITS,
+    "Time": TIME_UNITS,
+    "Area": AREA_UNITS,
+    "Volume": VOLUME_UNITS,
+    "Speed": SPEED_UNITS,
+    "Temperature": None,  # handled specially, see convert_temperature
+    "Pressure": PRESSURE_UNITS,
+    "Energy": ENERGY_UNITS,
+    "Data": DATA_UNITS,
+    "Angle": ANGLE_UNITS,
+}
+
+TEMPERATURE_UNITS = ["C", "F", "K"]
+
+
+def convert_units(category, value, from_unit, to_unit):
+    if category == "Temperature":
+        return convert_temperature(value, from_unit, to_unit)
+
+    units = CONVERSION_CATEGORIES[category]
+    base_value = value * units[from_unit]
+    return base_value / units[to_unit]
+
+
+def convert_temperature(value, from_unit, to_unit):
+    if from_unit == "C":
+        celsius = value
+    elif from_unit == "F":
+        celsius = (value - 32) * 5.0 / 9.0
+    elif from_unit == "K":
+        celsius = value - 273.15
+    else:
+        raise ValueError("Unknown temperature unit")
+
+    if to_unit == "C":
+        return celsius
+    if to_unit == "F":
+        return celsius * 9.0 / 5.0 + 32
+    if to_unit == "K":
+        return celsius + 273.15
+    raise ValueError("Unknown temperature unit")
+
+
 OPERATOR_CHARS = {"+", "-", "×", "÷", "^", "%"}
 
 SCIENTIFIC_COLOR_LABELS = {
@@ -159,6 +630,95 @@ SCIENTIFIC_COLOR_LABELS = {
     "√", "log", "ln", "π", "e", "n!",
     "x²", "x³", "xʸ", "1/x",
 }
+
+
+class GraphCanvas(Widget):
+    """Draws y = f(x) using plain Kivy graphics primitives - no
+    matplotlib or any other plotting dependency needed."""
+
+    def __init__(self, engine, expression, x_min=-10, x_max=10, **kwargs):
+        super().__init__(**kwargs)
+        self.engine = engine
+        self.expression = expression
+        self.x_min = x_min
+        self.x_max = x_max
+        self.error = None
+        self.bind(size=self.redraw, pos=self.redraw)
+        self.redraw()
+
+    def redraw(self, *args):
+        self.canvas.clear()
+        self.error = None
+
+        width, height = self.size
+        origin_x, origin_y = self.pos
+
+        if width <= 0 or height <= 0:
+            return
+
+        samples = 200
+        points_data = []
+        y_values = []
+
+        for i in range(samples + 1):
+            x = self.x_min + (self.x_max - self.x_min) * i / samples
+            try:
+                y = self.engine.evaluate(self.expression, variables={"x": x})
+            except Exception:
+                y = None
+
+            if isinstance(y, complex):
+                y = None
+            if isinstance(y, float) and (math.isnan(y) or math.isinf(y)):
+                y = None
+
+            points_data.append((x, y))
+            if y is not None:
+                y_values.append(y)
+
+        if not y_values:
+            self.error = "Could not plot this function over that range"
+            return
+
+        y_min, y_max = min(y_values), max(y_values)
+        if y_min == y_max:
+            y_min -= 1
+            y_max += 1
+        pad = (y_max - y_min) * 0.1
+        y_min -= pad
+        y_max += pad
+
+        def to_screen(x, y):
+            sx = origin_x + (x - self.x_min) / (self.x_max - self.x_min) * width
+            sy = origin_y + (y - y_min) / (y_max - y_min) * height
+            return sx, sy
+
+        with self.canvas:
+            Color(0.35, 0.35, 0.4, 1)
+
+            if y_min <= 0 <= y_max:
+                ax0, ay0 = to_screen(self.x_min, 0)
+                ax1, ay1 = to_screen(self.x_max, 0)
+                Line(points=[ax0, ay0, ax1, ay1], width=1)
+
+            if self.x_min <= 0 <= self.x_max:
+                bx0, by0 = to_screen(0, y_min)
+                bx1, by1 = to_screen(0, y_max)
+                Line(points=[bx0, by0, bx1, by1], width=1)
+
+            Color(0.2, 0.75, 0.95, 1)
+            segment_points = []
+            for x, y in points_data:
+                if y is None:
+                    if len(segment_points) >= 4:
+                        Line(points=segment_points, width=1.5)
+                    segment_points = []
+                    continue
+                sx, sy = to_screen(x, y)
+                segment_points.extend([sx, sy])
+
+            if len(segment_points) >= 4:
+                Line(points=segment_points, width=1.5)
 
 
 class Calculator(BoxLayout):
@@ -278,6 +838,18 @@ class Calculator(BoxLayout):
 
     def update_text_size(self, widget, size):
         widget.text_size = size
+
+    def make_sheet_popup(self, title, content, height=0.5):
+        """A popup that behaves like a keyboard sheet - docked to the
+        bottom of the screen, full width, and only as tall as it needs
+        to be - instead of a centered box covering most of the screen."""
+        return Popup(
+            title=title,
+            content=content,
+            size_hint=(1, height),
+            pos_hint={"x": 0, "y": 0},
+            auto_dismiss=True,
+        )
 
     def button_color(self, text):
         if text == "=":
@@ -509,47 +1081,59 @@ class Calculator(BoxLayout):
     # ------------------------------------------------------------------
 
     def open_more_menu(self):
-        layout = BoxLayout(
+        outer = BoxLayout(
             orientation="vertical",
-            spacing=dp(10),
+            spacing=dp(6),
             padding=dp(10),
         )
 
-        scientific = Button(text="\U0001F9EE Scientific")
-        memory = Button(text="\U0001F4BE Memory")
-        history = Button(text="\U0001F4DC History")
+        scroll = ScrollView()
+        menu_grid = GridLayout(
+            cols=1,
+            spacing=dp(6),
+            size_hint_y=None,
+        )
+        menu_grid.bind(minimum_height=menu_grid.setter("height"))
+        scroll.add_widget(menu_grid)
+        outer.add_widget(scroll)
+
         close = Button(
             text="Close",
             size_hint_y=None,
             height=dp(45),
         )
+        outer.add_widget(close)
 
-        layout.add_widget(scientific)
-        layout.add_widget(memory)
-        layout.add_widget(history)
-        layout.add_widget(close)
+        popup = self.make_sheet_popup("More", outer, height=0.65)
 
-        popup = Popup(
-            title="More",
-            content=layout,
-            size_hint=(0.8, 0.6),
-        )
+        tools = [
+            ("\U0001F9EE Scientific", self.show_scientific),
+            ("\U0001F522 Number Theory", self.show_number_theory),
+            ("\U0001F4D0 Algebra", self.show_algebra),
+            ("\u222B Calculus", self.show_calculus),
+            ("\U0001F9EE Matrices & Vectors", self.show_matrices_vectors),
+            ("\U0001F4CF Conversions", self.show_conversions),
+            ("\U0001F4C8 Graph", self.show_graph),
+            ("\U0001F4BE Memory", self.show_memory),
+            ("\U0001F4DC History", self.show_history),
+        ]
 
-        def open_scientific(instance):
-            popup.dismiss()
-            self.show_scientific()
+        for label, opener in tools:
+            button = Button(
+                text=label,
+                size_hint_y=None,
+                height=dp(45),
+            )
 
-        def open_memory(instance):
-            popup.dismiss()
-            self.show_memory()
+            def make_handler(fn):
+                def handler(instance):
+                    popup.dismiss()
+                    fn()
+                return handler
 
-        def open_history(instance):
-            popup.dismiss()
-            self.show_history()
+            button.bind(on_press=make_handler(opener))
+            menu_grid.add_widget(button)
 
-        scientific.bind(on_press=open_scientific)
-        memory.bind(on_press=open_memory)
-        history.bind(on_press=open_history)
         close.bind(on_press=popup.dismiss)
 
         popup.open()
@@ -604,11 +1188,7 @@ class Calculator(BoxLayout):
         )
         layout.add_widget(close_button)
 
-        popup = Popup(
-            title="Scientific",
-            content=layout,
-            size_hint=(0.9, 0.8),
-        )
+        popup = self.make_sheet_popup("Scientific", layout, height=0.6)
 
         close_button.bind(on_press=popup.dismiss)
         popup.open()
@@ -705,11 +1285,7 @@ class Calculator(BoxLayout):
         layout.add_widget(mm)
         layout.add_widget(close)
 
-        popup = Popup(
-            title="Memory",
-            content=layout,
-            size_hint=(0.7, 0.6),
-        )
+        popup = self.make_sheet_popup("Memory", layout, height=0.42)
 
         mc.bind(on_press=lambda x: self.memory_clear())
         mr.bind(on_press=lambda x: self.memory_recall())
@@ -815,11 +1391,7 @@ class Calculator(BoxLayout):
         popup_layout.add_widget(clear_button)
         popup_layout.add_widget(close_button)
 
-        popup = Popup(
-            title="Calculation History",
-            content=popup_layout,
-            size_hint=(0.9, 0.8),
-        )
+        popup = self.make_sheet_popup("Calculation History", popup_layout, height=0.6)
 
         def clear_history(instance):
             self.history = []
@@ -834,6 +1406,611 @@ class Calculator(BoxLayout):
     # ------------------------------------------------------------------
     # About popup
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Shared popup-building helpers
+    # ------------------------------------------------------------------
+
+    def _labeled_input(self, layout, hint_text):
+        label = Label(
+            text=hint_text,
+            size_hint_y=None,
+            height=dp(24),
+            font_size="12sp",
+            halign="left",
+            valign="middle",
+        )
+        label.bind(size=self.update_text_size)
+        layout.add_widget(label)
+
+        field = TextInput(
+            multiline=False,
+            size_hint_y=None,
+            height=dp(40),
+        )
+        layout.add_widget(field)
+        return field
+
+    def _result_label(self, layout, height=dp(60)):
+        result = Label(
+            text="",
+            size_hint_y=None,
+            height=height,
+            font_size="14sp",
+            halign="left",
+            valign="middle",
+        )
+        result.bind(size=self.update_text_size)
+        layout.add_widget(result)
+        return result
+
+    def _action_row(self, layout, specs):
+        """specs: list of (label, callback) tuples, rendered as a row of buttons."""
+        row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(45),
+            spacing=dp(5),
+        )
+        for label, callback in specs:
+            button = Button(text=label)
+            button.bind(on_press=callback)
+            row.add_widget(button)
+        layout.add_widget(row)
+
+    # ------------------------------------------------------------------
+    # Number Theory popup (Phase 3)
+    # ------------------------------------------------------------------
+
+    def show_number_theory(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="Prime check & factorization",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        n_field = self._labeled_input(layout, "Whole number")
+        n_result = self._result_label(layout)
+
+        def check_prime(instance):
+            try:
+                n = int(float(n_field.text))
+                verdict = "prime" if is_prime(n) else "not prime"
+                n_result.text = f"{n} is {verdict}"
+            except Exception as exc:
+                n_result.text = f"Error: {exc}"
+
+        def factorize(instance):
+            try:
+                n = int(float(n_field.text))
+                factors = prime_factorize(n)
+                n_result.text = format_prime_factors(factors)
+            except Exception as exc:
+                n_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("Is Prime?", check_prime),
+            ("Prime Factors", factorize),
+        ])
+
+        layout.add_widget(Label(
+            text="GCD & LCM",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        a_field = self._labeled_input(layout, "First whole number")
+        b_field = self._labeled_input(layout, "Second whole number")
+        ab_result = self._result_label(layout, height=dp(40))
+
+        def compute_gcd(instance):
+            try:
+                a, b = int(float(a_field.text)), int(float(b_field.text))
+                ab_result.text = f"GCD = {gcd_of(a, b)}"
+            except Exception as exc:
+                ab_result.text = f"Error: {exc}"
+
+        def compute_lcm(instance):
+            try:
+                a, b = int(float(a_field.text)), int(float(b_field.text))
+                ab_result.text = f"LCM = {lcm_of(a, b)}"
+            except Exception as exc:
+                ab_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("GCD", compute_gcd),
+            ("LCM", compute_lcm),
+        ])
+
+        layout.add_widget(Label(
+            text="Simplify a fraction",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        num_field = self._labeled_input(layout, "Numerator")
+        den_field = self._labeled_input(layout, "Denominator")
+        frac_result = self._result_label(layout, height=dp(40))
+
+        def simplify(instance):
+            try:
+                num, den = int(float(num_field.text)), int(float(den_field.text))
+                n, d = simplify_fraction(num, den)
+                frac_result.text = f"= {n}/{d}"
+            except Exception as exc:
+                frac_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [("Simplify", simplify)])
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Number Theory", scroll, height=0.75)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Algebra popup (Phase 3)
+    # ------------------------------------------------------------------
+
+    def show_algebra(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="Equation in x, e.g. 2*x+3=7  or  x^2-5*x+6=0",
+            size_hint_y=None, height=dp(36), font_size="12sp",
+        ))
+        eq_field = self._labeled_input(layout, "Equation")
+        eq_result = self._result_label(layout, height=dp(50))
+
+        def do_linear(instance):
+            try:
+                x = solve_linear(self.engine, eq_field.text)
+                eq_result.text = f"x = {format_plain_number(x)}"
+            except Exception as exc:
+                eq_result.text = f"Error: {exc}"
+
+        def do_quadratic(instance):
+            try:
+                roots = solve_quadratic(self.engine, eq_field.text)
+                eq_result.text = "x = " + ", ".join(format_plain_number(r) for r in roots)
+            except Exception as exc:
+                eq_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("Solve Linear", do_linear),
+            ("Solve Quadratic", do_quadratic),
+        ])
+
+        layout.add_widget(Label(
+            text="Simultaneous equations in x and y",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        eq1_field = self._labeled_input(layout, "Equation 1, e.g. 2*x+y=5")
+        eq2_field = self._labeled_input(layout, "Equation 2, e.g. x-y=1")
+        sim_result = self._result_label(layout, height=dp(40))
+
+        def do_simultaneous(instance):
+            try:
+                x, y = solve_simultaneous(self.engine, eq1_field.text, eq2_field.text)
+                sim_result.text = f"x = {format_plain_number(x)}, y = {format_plain_number(y)}"
+            except Exception as exc:
+                sim_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [("Solve Simultaneous", do_simultaneous)])
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Algebra", scroll, height=0.75)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Calculus popup (Phase 4) - numerical methods, radians internally
+    # ------------------------------------------------------------------
+
+    def show_calculus(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="f(x) = , e.g. x^2, sin(x), 1/x",
+            size_hint_y=None, height=dp(24), font_size="12sp",
+        ))
+        expr_field = self._labeled_input(layout, "f(x)")
+        point_field = self._labeled_input(layout, "x =")
+        calc_result = self._result_label(layout, height=dp(60))
+
+        def with_radians(func):
+            previous_mode = self.engine.angle_mode
+            self.engine.angle_mode = "rad"
+            try:
+                return func()
+            finally:
+                self.engine.angle_mode = previous_mode
+
+        def do_derivative(instance):
+            try:
+                x0 = float(point_field.text)
+                value = with_radians(
+                    lambda: numerical_derivative(self.engine, expr_field.text, x0)
+                )
+                calc_result.text = f"f'({format_plain_number(x0)}) \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+
+        def do_second_derivative(instance):
+            try:
+                x0 = float(point_field.text)
+                value = with_radians(
+                    lambda: numerical_second_derivative(self.engine, expr_field.text, x0)
+                )
+                calc_result.text = f"f''({format_plain_number(x0)}) \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+
+        def do_limit(instance):
+            try:
+                x0 = float(point_field.text)
+                value = with_radians(
+                    lambda: numerical_limit(self.engine, expr_field.text, x0)
+                )
+                calc_result.text = f"limit at x={format_plain_number(x0)} \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("f'(x)", do_derivative),
+            ("f''(x)", do_second_derivative),
+            ("limit", do_limit),
+        ])
+
+        layout.add_widget(Label(
+            text="Definite integral, from a to b",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        a_field = self._labeled_input(layout, "a =")
+        b_field = self._labeled_input(layout, "b =")
+        integral_result = self._result_label(layout, height=dp(40))
+
+        def do_integral(instance):
+            try:
+                a, b = float(a_field.text), float(b_field.text)
+                value = with_radians(
+                    lambda: numerical_integral(self.engine, expr_field.text, a, b)
+                )
+                integral_result.text = f"\u222b f(x) dx \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                integral_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [("Integrate", do_integral)])
+
+        note = Label(
+            text=(
+                "Note: results are close numerical approximations, "
+                "not exact symbolic answers. Trig functions here always "
+                "use radians, regardless of the Scientific DEG/RAD setting."
+            ),
+            size_hint_y=None, height=dp(50), font_size="11sp",
+        )
+        note.bind(size=self.update_text_size)
+        layout.add_widget(note)
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Calculus", scroll, height=0.8)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Matrices & Vectors popup (Phase 5)
+    # ------------------------------------------------------------------
+
+    def show_matrices_vectors(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="Matrices - rows separated by ; , values by ,  e.g. 1,2;3,4",
+            size_hint_y=None, height=dp(36), font_size="12sp",
+        ))
+        matrix_a_field = self._labeled_input(layout, "Matrix A")
+        matrix_b_field = self._labeled_input(layout, "Matrix B (for +, -, x)")
+        matrix_result = self._result_label(layout, height=dp(90))
+
+        def matrix_op(op):
+            def handler(instance):
+                try:
+                    a = parse_matrix(matrix_a_field.text)
+                    if op in ("add", "sub", "mul"):
+                        b = parse_matrix(matrix_b_field.text)
+                        if op == "add":
+                            result = matrix_add(a, b)
+                        elif op == "sub":
+                            result = matrix_add(a, b, sign=-1)
+                        else:
+                            result = matrix_multiply(a, b)
+                        matrix_result.text = format_matrix(result)
+                    elif op == "det":
+                        matrix_result.text = f"det(A) = {format_plain_number(matrix_determinant(a))}"
+                    elif op == "inv":
+                        matrix_result.text = format_matrix(matrix_inverse(a))
+                    elif op == "transpose":
+                        matrix_result.text = format_matrix(matrix_transpose(a))
+                    elif op == "rank":
+                        matrix_result.text = f"rank(A) = {matrix_rank(a)}"
+                except Exception as exc:
+                    matrix_result.text = f"Error: {exc}"
+            return handler
+
+        self._action_row(layout, [
+            ("A+B", matrix_op("add")),
+            ("A-B", matrix_op("sub")),
+            ("A\u00d7B", matrix_op("mul")),
+        ])
+        self._action_row(layout, [
+            ("det(A)", matrix_op("det")),
+            ("inverse(A)", matrix_op("inv")),
+        ])
+        self._action_row(layout, [
+            ("transpose(A)", matrix_op("transpose")),
+            ("rank(A)", matrix_op("rank")),
+        ])
+
+        layout.add_widget(Label(
+            text="Vectors - comma separated, e.g. 1,2,3",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        vec_a_field = self._labeled_input(layout, "Vector A")
+        vec_b_field = self._labeled_input(layout, "Vector B (for +, dot, cross)")
+        vector_result = self._result_label(layout, height=dp(50))
+
+        def vector_op(op):
+            def handler(instance):
+                try:
+                    a = parse_vector(vec_a_field.text)
+                    if op in ("add", "dot", "cross"):
+                        b = parse_vector(vec_b_field.text)
+                        if op == "add":
+                            vector_result.text = format_vector(vector_add(a, b))
+                        elif op == "dot":
+                            vector_result.text = f"A\u00b7B = {format_plain_number(vector_dot(a, b))}"
+                        else:
+                            vector_result.text = format_vector(vector_cross(a, b))
+                    elif op == "magnitude":
+                        vector_result.text = f"|A| = {format_plain_number(vector_magnitude(a))}"
+                    elif op == "unit":
+                        vector_result.text = format_vector(vector_unit(a))
+                except Exception as exc:
+                    vector_result.text = f"Error: {exc}"
+            return handler
+
+        self._action_row(layout, [
+            ("A+B", vector_op("add")),
+            ("A\u00b7B dot", vector_op("dot")),
+        ])
+        self._action_row(layout, [
+            ("A\u00d7B cross", vector_op("cross")),
+            ("|A|", vector_op("magnitude")),
+            ("unit(A)", vector_op("unit")),
+        ])
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Matrices & Vectors", scroll, height=0.85)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Conversions popup (Phase 7)
+    # ------------------------------------------------------------------
+
+    def show_conversions(self):
+        outer = BoxLayout(
+            orientation="vertical",
+            spacing=dp(6),
+            padding=dp(10),
+        )
+
+        category_grid = GridLayout(
+            cols=4,
+            size_hint_y=None,
+            height=dp(90),
+            spacing=dp(4),
+        )
+        for category in CONVERSION_CATEGORIES:
+            button = Button(text=category, font_size="12sp")
+            button.bind(on_press=lambda inst, c=category: select_category(c))
+            category_grid.add_widget(button)
+        outer.add_widget(category_grid)
+
+        units_area = BoxLayout(orientation="vertical", spacing=dp(6))
+        outer.add_widget(units_area)
+
+        state = {"category": None, "from_unit": None, "to_unit": None}
+
+        def select_category(category):
+            state["category"] = category
+            state["from_unit"] = None
+            state["to_unit"] = None
+            rebuild_units_area()
+
+        def rebuild_units_area():
+            units_area.clear_widgets()
+            category = state["category"]
+            if category is None:
+                units_area.add_widget(Label(text="Pick a category above"))
+                return
+
+            unit_names = (
+                TEMPERATURE_UNITS if category == "Temperature"
+                else list(CONVERSION_CATEGORIES[category].keys())
+            )
+            state["from_unit"] = unit_names[0]
+            state["to_unit"] = unit_names[1] if len(unit_names) > 1 else unit_names[0]
+
+            units_area.add_widget(Label(
+                text=f"{category}: from",
+                size_hint_y=None, height=dp(22), font_size="12sp",
+            ))
+            from_grid = GridLayout(
+                cols=4, size_hint_y=None, height=dp(40 * ((len(unit_names) + 3) // 4)),
+                spacing=dp(3),
+            )
+            from_buttons = {}
+
+            def pick_from(unit):
+                state["from_unit"] = unit
+                for name, btn in from_buttons.items():
+                    btn.background_color = (0.1, 0.55, 0.9, 1) if name == unit else (0.15, 0.15, 0.18, 1)
+
+            for unit in unit_names:
+                b = Button(
+                    text=unit, font_size="12sp",
+                    background_normal="",
+                    background_color=(0.1, 0.55, 0.9, 1) if unit == state["from_unit"] else (0.15, 0.15, 0.18, 1),
+                )
+                b.bind(on_press=lambda inst, u=unit: pick_from(u))
+                from_buttons[unit] = b
+                from_grid.add_widget(b)
+            units_area.add_widget(from_grid)
+
+            units_area.add_widget(Label(
+                text="to",
+                size_hint_y=None, height=dp(22), font_size="12sp",
+            ))
+            to_grid = GridLayout(
+                cols=4, size_hint_y=None, height=dp(40 * ((len(unit_names) + 3) // 4)),
+                spacing=dp(3),
+            )
+            to_buttons = {}
+
+            def pick_to(unit):
+                state["to_unit"] = unit
+                for name, btn in to_buttons.items():
+                    btn.background_color = (0.1, 0.55, 0.9, 1) if name == unit else (0.15, 0.15, 0.18, 1)
+
+            for unit in unit_names:
+                b = Button(
+                    text=unit, font_size="12sp",
+                    background_normal="",
+                    background_color=(0.1, 0.55, 0.9, 1) if unit == state["to_unit"] else (0.15, 0.15, 0.18, 1),
+                )
+                b.bind(on_press=lambda inst, u=unit: pick_to(u))
+                to_buttons[unit] = b
+                to_grid.add_widget(b)
+            units_area.add_widget(to_grid)
+
+            value_field = TextInput(
+                multiline=False, size_hint_y=None, height=dp(40),
+                hint_text="Value to convert",
+            )
+            units_area.add_widget(value_field)
+
+            result_label = Label(text="", size_hint_y=None, height=dp(40))
+            result_label.bind(size=self.update_text_size)
+
+            def do_convert(instance):
+                try:
+                    value = float(value_field.text)
+                    converted = convert_units(category, value, state["from_unit"], state["to_unit"])
+                    result_label.text = (
+                        f"{format_plain_number(value)} {state['from_unit']} = "
+                        f"{format_plain_number(converted)} {state['to_unit']}"
+                    )
+                except Exception as exc:
+                    result_label.text = f"Error: {exc}"
+
+            convert_button = Button(text="Convert", size_hint_y=None, height=dp(40))
+            convert_button.bind(on_press=do_convert)
+            units_area.add_widget(convert_button)
+            units_area.add_widget(result_label)
+
+        rebuild_units_area()
+
+        popup = self.make_sheet_popup("Conversions", outer, height=0.85)
+        popup.open()
+
+        return popup, state, select_category
+
+    # ------------------------------------------------------------------
+    # Graphing popup (Phase 6 - basic function plotting)
+    # ------------------------------------------------------------------
+
+    def show_graph(self):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+        )
+
+        controls = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            spacing=dp(5),
+        )
+        expr_field = TextInput(
+            multiline=False,
+            hint_text="f(x) = e.g. sin(x)",
+        )
+        x_min_field = TextInput(multiline=False, text="-10", size_hint_x=0.3)
+        x_max_field = TextInput(multiline=False, text="10", size_hint_x=0.3)
+        controls.add_widget(expr_field)
+        controls.add_widget(x_min_field)
+        controls.add_widget(x_max_field)
+        layout.add_widget(controls)
+
+        plot_area = BoxLayout(size_hint_y=1)
+        layout.add_widget(plot_area)
+
+        error_label = Label(text="", size_hint_y=None, height=dp(30))
+        error_label.bind(size=self.update_text_size)
+        layout.add_widget(error_label)
+
+        def plot(instance):
+            plot_area.clear_widgets()
+            error_label.text = ""
+            try:
+                x_min = float(x_min_field.text)
+                x_max = float(x_max_field.text)
+                if x_min >= x_max:
+                    raise ValueError("x min must be less than x max")
+
+                previous_mode = self.engine.angle_mode
+                self.engine.angle_mode = "rad"
+                try:
+                    graph = GraphCanvas(self.engine, expr_field.text, x_min=x_min, x_max=x_max)
+                finally:
+                    self.engine.angle_mode = previous_mode
+
+                plot_area.add_widget(graph)
+                if graph.error:
+                    error_label.text = graph.error
+            except Exception as exc:
+                error_label.text = f"Error: {exc}"
+
+        plot_button = Button(text="Plot", size_hint_y=None, height=dp(40))
+        plot_button.bind(on_press=plot)
+        layout.add_widget(plot_button)
+
+        popup = self.make_sheet_popup("Graph", layout, height=0.85)
+        popup.open()
+
+        return popup, plot
 
     def show_about(self, instance):
         layout = BoxLayout(
@@ -863,11 +2040,7 @@ class Calculator(BoxLayout):
         layout.add_widget(about_label)
         layout.add_widget(close_button)
 
-        popup = Popup(
-            title="About",
-            content=layout,
-            size_hint=(0.8, 0.5),
-        )
+        popup = self.make_sheet_popup("About", layout, height=0.35)
 
         close_button.bind(on_press=popup.dismiss)
         popup.open()
@@ -881,3 +2054,4 @@ class MathematicalCalculatorApp(App):
 
 if __name__ == "__main__":
     MathematicalCalculatorApp().run()
+
