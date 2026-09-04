@@ -55,6 +55,7 @@ class MathEngine:
             "sqrt": self._sqrt,
             "log": self._log10,
             "ln": self._ln,
+            "logb": self._log_base,
             "fact": self._factorial,
             "abs": abs,
             "sin": lambda x: self._trig(math.sin, x),
@@ -90,6 +91,13 @@ class MathEngine:
         if x <= 0:
             raise ValueError("Logarithm requires a positive number")
         return math.log(x)
+
+    def _log_base(self, x, base):
+        if x <= 0:
+            raise ValueError("Logarithm requires a positive number")
+        if base <= 0 or base == 1:
+            raise ValueError("Logarithm base must be positive and not 1")
+        return math.log(x) / math.log(base)
 
     def _factorial(self, x):
         if x < 0 or int(x) != x:
@@ -646,19 +654,104 @@ OPERATOR_CHARS = {"+", "-", "×", "÷", "^", "%"}
 
 SCIENTIFIC_COLOR_LABELS = {
     "sin", "cos", "tan", "asin", "acos", "atan",
-    "√", "log", "ln", "π", "e", "n!",
+    "√", "log", "ln", "logb", "π", "e", "n!",
     "x²", "x³", "xʸ", "1/x",
 }
 
 
-class GraphCanvas(Widget):
-    """Draws y = f(x) using plain Kivy graphics primitives - no
-    matplotlib or any other plotting dependency needed."""
+def sample_function(engine, expression, x_min, x_max, samples=400):
+    """Evaluates expression at evenly spaced x values, returning a list of
+    (x, y) pairs. y is None where the function is undefined/invalid there."""
+    points = []
+    for i in range(samples + 1):
+        x = x_min + (x_max - x_min) * i / samples
+        try:
+            y = engine.evaluate(expression, variables={"x": x})
+        except Exception:
+            y = None
 
-    def __init__(self, engine, expression, x_min=-10, x_max=10, **kwargs):
+        if isinstance(y, complex):
+            y = None
+        if isinstance(y, float) and (math.isnan(y) or math.isinf(y)):
+            y = None
+
+        points.append((x, y))
+    return points
+
+
+def find_roots(engine, expression, x_min, x_max, samples=400, tolerance=1e-9):
+    """Finds x-values where expression == 0 within [x_min, x_max], by
+    scanning for sign changes between samples and refining each with
+    bisection. Pure numerical method - no symbolic solving needed."""
+    def f(x):
+        try:
+            return engine.evaluate(expression, variables={"x": x})
+        except Exception:
+            return None
+
+    roots = []
+    step = (x_max - x_min) / samples
+    prev_x = x_min
+    prev_y = f(prev_x)
+
+    for i in range(1, samples + 1):
+        x = x_min + i * step
+        y = f(x)
+
+        if prev_y is not None and y is not None:
+            if prev_y == 0:
+                roots.append(prev_x)
+            elif prev_y * y < 0:
+                lo, hi, f_lo = prev_x, x, prev_y
+                for _ in range(60):
+                    mid = (lo + hi) / 2
+                    f_mid = f(mid)
+                    if f_mid is None:
+                        break
+                    if abs(f_mid) < tolerance:
+                        lo = hi = mid
+                        break
+                    if f_lo * f_mid < 0:
+                        hi = mid
+                    else:
+                        lo, f_lo = mid, f_mid
+                roots.append((lo + hi) / 2)
+
+        prev_x, prev_y = x, y
+
+    deduped = []
+    for r in roots:
+        if not any(abs(r - existing) < 1e-6 for existing in deduped):
+            deduped.append(r)
+    return deduped
+
+
+def find_intersections(engine, expression1, expression2, x_min, x_max, samples=400):
+    """Finds where two functions cross, by finding roots of their
+    difference. Returns a list of (x, y) points."""
+    combined = f"({expression1})-({expression2})"
+    xs = find_roots(engine, combined, x_min, x_max, samples)
+
+    points = []
+    for x in xs:
+        try:
+            y = engine.evaluate(expression1, variables={"x": x})
+            points.append((x, y))
+        except Exception:
+            continue
+    return points
+
+
+class GraphCanvas(Widget):
+    """Draws y = f(x), and optionally a second y = g(x), using plain Kivy
+    graphics primitives - no matplotlib or any other plotting dependency
+    needed."""
+
+    def __init__(self, engine, expression, expression2=None, x_min=-10, x_max=10, **kwargs):
         super().__init__(**kwargs)
         self.engine = engine
         self.expression = expression
+        self.expression2 = expression2
         self.x_min = x_min
         self.x_max = x_max
         self.error = None
@@ -675,25 +768,13 @@ class GraphCanvas(Widget):
         if width <= 0 or height <= 0:
             return
 
-        samples = 200
-        points_data = []
-        y_values = []
+        points_data = sample_function(self.engine, self.expression, self.x_min, self.x_max)
+        y_values = [y for _, y in points_data if y is not None]
 
-        for i in range(samples + 1):
-            x = self.x_min + (self.x_max - self.x_min) * i / samples
-            try:
-                y = self.engine.evaluate(self.expression, variables={"x": x})
-            except Exception:
-                y = None
-
-            if isinstance(y, complex):
-                y = None
-            if isinstance(y, float) and (math.isnan(y) or math.isinf(y)):
-                y = None
-
-            points_data.append((x, y))
-            if y is not None:
-                y_values.append(y)
+        points_data2 = []
+        if self.expression2:
+            points_data2 = sample_function(self.engine, self.expression2, self.x_min, self.x_max)
+            y_values.extend(y for _, y in points_data2 if y is not None)
 
         if not y_values:
             self.error = "Could not plot this function over that range"
@@ -712,6 +793,19 @@ class GraphCanvas(Widget):
             sy = origin_y + (y - y_min) / (y_max - y_min) * height
             return sx, sy
 
+        def draw_curve(points):
+            segment_points = []
+            for x, y in points:
+                if y is None:
+                    if len(segment_points) >= 4:
+                        Line(points=segment_points, width=1.5)
+                    segment_points = []
+                    continue
+                sx, sy = to_screen(x, y)
+                segment_points.extend([sx, sy])
+            if len(segment_points) >= 4:
+                Line(points=segment_points, width=1.5)
+
         with self.canvas:
             Color(0.35, 0.35, 0.4, 1)
 
@@ -726,18 +820,11 @@ class GraphCanvas(Widget):
                 Line(points=[bx0, by0, bx1, by1], width=1)
 
             Color(0.2, 0.75, 0.95, 1)
-            segment_points = []
-            for x, y in points_data:
-                if y is None:
-                    if len(segment_points) >= 4:
-                        Line(points=segment_points, width=1.5)
-                    segment_points = []
-                    continue
-                sx, sy = to_screen(x, y)
-                segment_points.extend([sx, sy])
+            draw_curve(points_data)
 
-            if len(segment_points) >= 4:
-                Line(points=segment_points, width=1.5)
+            if points_data2:
+                Color(0.95, 0.55, 0.2, 1)
+                draw_curve(points_data2)
 
 
 class Calculator(BoxLayout):
@@ -756,14 +843,15 @@ class Calculator(BoxLayout):
 
         self.memory_label = None
         self.mode_button = None
+        self.dark_mode = True
 
-        title = Label(
+        self.title_label = Label(
             text="MATHEMATICAL CALCULATOR",
             size_hint_y=0.07,
             font_size="22sp",
             bold=True,
         )
-        self.add_widget(title)
+        self.add_widget(self.title_label)
 
         version_bar = BoxLayout(
             orientation="horizontal",
@@ -771,13 +859,13 @@ class Calculator(BoxLayout):
             spacing=dp(5),
         )
 
-        version = Label(
+        self.version_label = Label(
             text=f"Version {APP_VERSION}",
             font_size="12sp",
             halign="left",
             valign="middle",
         )
-        version.bind(size=self.update_text_size)
+        self.version_label.bind(size=self.update_text_size)
 
         info_button = Button(
             text="i",
@@ -786,7 +874,7 @@ class Calculator(BoxLayout):
         )
         info_button.bind(on_press=self.show_about)
 
-        version_bar.add_widget(version)
+        version_bar.add_widget(self.version_label)
         version_bar.add_widget(info_button)
         self.add_widget(version_bar)
 
@@ -863,6 +951,33 @@ class Calculator(BoxLayout):
         self.add_widget(grid)
 
         self.load_state()
+        self.apply_theme()
+
+    # ------------------------------------------------------------------
+    # Theme (Phase 8) - light/dark mode
+    # ------------------------------------------------------------------
+
+    def apply_theme(self):
+        if self.dark_mode:
+            Window.clearcolor = (0.04, 0.04, 0.06, 1)
+            text_color = (1, 1, 1, 1)
+            muted_color = (0.55, 0.55, 0.6, 1)
+        else:
+            Window.clearcolor = (0.93, 0.93, 0.95, 1)
+            text_color = (0.05, 0.05, 0.08, 1)
+            muted_color = (0.35, 0.35, 0.4, 1)
+
+        self.title_label.color = text_color
+        self.version_label.color = muted_color
+        self.history_label.color = muted_color
+        self.memory_indicator.color = text_color
+        self.display.color = text_color
+        self.preview_label.color = muted_color
+
+    def toggle_theme(self):
+        self.dark_mode = not self.dark_mode
+        self.apply_theme()
+        self.save_state()
 
     # ------------------------------------------------------------------
     # Persistence - memory & history survive an app restart
@@ -884,7 +999,11 @@ class Calculator(BoxLayout):
             return
         try:
             with open(path, "w") as f:
-                json.dump({"memory": self.memory, "history": self.history}, f)
+                json.dump({
+                    "memory": self.memory,
+                    "history": self.history,
+                    "dark_mode": self.dark_mode,
+                }, f)
         except Exception:
             pass
 
@@ -900,6 +1019,7 @@ class Calculator(BoxLayout):
             return
 
         self.memory = data.get("memory", 0)
+        self.dark_mode = data.get("dark_mode", True)
         raw_history = data.get("history", [])
         self.history = [
             tuple(item) for item in raw_history
@@ -1231,6 +1351,7 @@ class Calculator(BoxLayout):
             ("\U0001F4C8 Graph", self.show_graph),
             ("\U0001F4BE Memory", self.show_memory),
             ("\U0001F4DC History", self.show_history),
+            ("\u2699 Settings", self.show_settings),
         ]
 
         for label, opener in tools:
@@ -1274,6 +1395,7 @@ class Calculator(BoxLayout):
             "asin", "acos", "atan",
             "x²", "x³", "√",
             "xʸ", "1/x", "n!",
+            "log", "ln", "logb",
             "π", "e", "DEG",
         ]
 
@@ -1323,6 +1445,9 @@ class Calculator(BoxLayout):
             "acos": "acos(",
             "atan": "atan(",
             "√": "sqrt(",
+            "log": "log(",
+            "ln": "ln(",
+            "logb": "logb(",
         }
 
         if text in function_tokens:
@@ -2072,64 +2197,218 @@ class Calculator(BoxLayout):
     def show_graph(self):
         layout = BoxLayout(
             orientation="vertical",
-            spacing=dp(8),
+            spacing=dp(6),
             padding=dp(10),
         )
 
-        controls = BoxLayout(
+        expr_row = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
             height=dp(40),
             spacing=dp(5),
         )
-        expr_field = TextInput(
-            multiline=False,
-            hint_text="f(x) = e.g. sin(x)",
+        expr_field = TextInput(multiline=False, hint_text="f(x) = e.g. sin(x)")
+        expr_row.add_widget(expr_field)
+        layout.add_widget(expr_row)
+
+        expr2_row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            spacing=dp(5),
         )
-        x_min_field = TextInput(multiline=False, text="-10", size_hint_x=0.3)
-        x_max_field = TextInput(multiline=False, text="10", size_hint_x=0.3)
-        controls.add_widget(expr_field)
-        controls.add_widget(x_min_field)
-        controls.add_widget(x_max_field)
-        layout.add_widget(controls)
+        expr2_field = TextInput(multiline=False, hint_text="g(x) = optional, e.g. x+2")
+        expr2_row.add_widget(expr2_field)
+        layout.add_widget(expr2_row)
+
+        range_row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            spacing=dp(5),
+        )
+        x_min_field = TextInput(multiline=False, text="-10")
+        x_max_field = TextInput(multiline=False, text="10")
+        range_row.add_widget(Label(text="x min", size_hint_x=0.3))
+        range_row.add_widget(x_min_field)
+        range_row.add_widget(Label(text="x max", size_hint_x=0.3))
+        range_row.add_widget(x_max_field)
+        layout.add_widget(range_row)
 
         plot_area = BoxLayout(size_hint_y=1)
         layout.add_widget(plot_area)
 
-        error_label = Label(text="", size_hint_y=None, height=dp(30))
-        error_label.bind(size=self.update_text_size)
-        layout.add_widget(error_label)
+        result_label = Label(text="", size_hint_y=None, height=dp(50))
+        result_label.bind(size=self.update_text_size)
+        layout.add_widget(result_label)
 
-        def plot(instance):
+        state = {"graph": None}
+
+        def with_radians(func):
+            previous_mode = self.engine.angle_mode
+            self.engine.angle_mode = "rad"
+            try:
+                return func()
+            finally:
+                self.engine.angle_mode = previous_mode
+
+        def plot(instance=None):
             plot_area.clear_widgets()
-            error_label.text = ""
+            result_label.text = ""
             try:
                 x_min = float(x_min_field.text)
                 x_max = float(x_max_field.text)
                 if x_min >= x_max:
                     raise ValueError("x min must be less than x max")
 
-                previous_mode = self.engine.angle_mode
-                self.engine.angle_mode = "rad"
-                try:
-                    graph = GraphCanvas(self.engine, expr_field.text, x_min=x_min, x_max=x_max)
-                finally:
-                    self.engine.angle_mode = previous_mode
+                expr2 = expr2_field.text.strip() or None
+
+                graph = with_radians(
+                    lambda: GraphCanvas(
+                        self.engine, expr_field.text, expression2=expr2,
+                        x_min=x_min, x_max=x_max,
+                    )
+                )
 
                 plot_area.add_widget(graph)
+                state["graph"] = graph
                 if graph.error:
-                    error_label.text = graph.error
+                    result_label.text = graph.error
             except Exception as exc:
-                error_label.text = f"Error: {exc}"
+                result_label.text = f"Error: {exc}"
 
-        plot_button = Button(text="Plot", size_hint_y=None, height=dp(40))
-        plot_button.bind(on_press=plot)
-        layout.add_widget(plot_button)
+        def zoom(factor):
+            def handler(instance):
+                try:
+                    x_min, x_max = float(x_min_field.text), float(x_max_field.text)
+                    center = (x_min + x_max) / 2
+                    half_range = (x_max - x_min) / 2 * factor
+                    x_min_field.text = format_plain_number(center - half_range)
+                    x_max_field.text = format_plain_number(center + half_range)
+                    plot()
+                except Exception as exc:
+                    result_label.text = f"Error: {exc}"
+            return handler
 
-        popup = self.make_sheet_popup("Graph", layout, height=0.85)
+        def pan(direction):
+            def handler(instance):
+                try:
+                    x_min, x_max = float(x_min_field.text), float(x_max_field.text)
+                    shift = (x_max - x_min) * 0.25 * direction
+                    x_min_field.text = format_plain_number(x_min + shift)
+                    x_max_field.text = format_plain_number(x_max + shift)
+                    plot()
+                except Exception as exc:
+                    result_label.text = f"Error: {exc}"
+            return handler
+
+        def find_roots_pressed(instance):
+            try:
+                x_min, x_max = float(x_min_field.text), float(x_max_field.text)
+                roots = with_radians(
+                    lambda: find_roots(self.engine, expr_field.text, x_min, x_max)
+                )
+                if roots:
+                    result_label.text = "Roots: " + ", ".join(
+                        format_plain_number(r) for r in sorted(roots)
+                    )
+                else:
+                    result_label.text = "No roots found in this range"
+            except Exception as exc:
+                result_label.text = f"Error: {exc}"
+
+        def find_intersections_pressed(instance):
+            try:
+                if not expr2_field.text.strip():
+                    result_label.text = "Enter a g(x) to find intersections with"
+                    return
+                x_min, x_max = float(x_min_field.text), float(x_max_field.text)
+                points = with_radians(
+                    lambda: find_intersections(
+                        self.engine, expr_field.text, expr2_field.text, x_min, x_max
+                    )
+                )
+                if points:
+                    result_label.text = "Intersections: " + ", ".join(
+                        f"({format_plain_number(x)}, {format_plain_number(y)})"
+                        for x, y in sorted(points, key=lambda p: p[0])
+                    )
+                else:
+                    result_label.text = "No intersections found in this range"
+            except Exception as exc:
+                result_label.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("Plot", plot),
+            ("Roots", find_roots_pressed),
+            ("Intersect", find_intersections_pressed),
+        ])
+        self._action_row(layout, [
+            ("Zoom In", zoom(0.5)),
+            ("Zoom Out", zoom(2)),
+            ("\u25c0 Pan", pan(-1)),
+            ("Pan \u25b6", pan(1)),
+        ])
+
+        popup = self.make_sheet_popup("Graph", layout, height=0.9)
         popup.open()
 
         return popup, plot
+
+    def show_settings(self):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(10),
+            padding=dp(10),
+        )
+
+        layout.add_widget(Label(
+            text="Appearance",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+
+        theme_button = Button(
+            text="Switch to Light Mode" if self.dark_mode else "Switch to Dark Mode",
+            size_hint_y=None, height=dp(45),
+        )
+
+        def do_toggle_theme(instance):
+            self.toggle_theme()
+            theme_button.text = "Switch to Light Mode" if self.dark_mode else "Switch to Dark Mode"
+
+        theme_button.bind(on_press=do_toggle_theme)
+        layout.add_widget(theme_button)
+
+        layout.add_widget(Label(
+            text="Data",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+
+        clear_data_button = Button(
+            text="Clear All Saved Data (memory & history)",
+            size_hint_y=None, height=dp(45),
+        )
+        clear_status = Label(text="", size_hint_y=None, height=dp(30))
+        clear_status.bind(size=self.update_text_size)
+
+        def do_clear_data(instance):
+            self.memory = 0
+            self.history = []
+            self.update_memory_indicator()
+            self.history_label.text = "Welcome.\n\nLet's calculate something."
+            self.save_state()
+            clear_status.text = "All saved data cleared."
+
+        clear_data_button.bind(on_press=do_clear_data)
+        layout.add_widget(clear_data_button)
+        layout.add_widget(clear_status)
+
+        close_button = Button(text="Close", size_hint_y=None, height=dp(45))
+        layout.add_widget(close_button)
+
+        popup = self.make_sheet_popup("Settings", layout, height=0.45)
+        close_button.bind(on_press=popup.dismiss)
+        popup.open()
 
     def show_about(self, instance):
         layout = BoxLayout(
