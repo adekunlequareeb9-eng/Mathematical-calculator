@@ -1,9 +1,12 @@
 import ast
+import json
 import math
 import operator
+import os
+import re
+from fractions import Fraction
 
 from kivy.app import App
-from kivy.core.clipboard import Clipboard
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
@@ -13,16 +16,21 @@ from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
+from kivy.graphics import Color, Line
 
 
 Window.clearcolor = (0.04, 0.04, 0.06, 1)
 
-
-VERSION = "1.8"
+APP_VERSION = "1.7"
 
 
 class MathEngine:
-    """Safe calculator engine using Python's AST instead of eval()."""
+    """Safe AST-based expression evaluator.
+
+    Only a fixed set of operators, functions and constants are supported,
+    so arbitrary code can never be executed through eval().
+    """
 
     operators = {
         ast.Add: operator.add,
@@ -35,24 +43,71 @@ class MathEngine:
         ast.UAdd: operator.pos,
     }
 
-    functions = {
-        "sqrt": math.sqrt,
-        "log": math.log10,
-        "ln": math.log,
-        "sin": lambda x: math.sin(math.radians(x)),
-        "cos": lambda x: math.cos(math.radians(x)),
-        "tan": lambda x: math.tan(math.radians(x)),
-        "fact": math.factorial,
-        "abs": abs,
-    }
-
     constants = {
         "pi": math.pi,
         "e": math.e,
     }
 
-    def evaluate(self, expression):
-        expression = self.normalise(expression)
+    def __init__(self):
+        self.angle_mode = "deg"  # "deg" or "rad"
+
+        self.functions = {
+            "sqrt": self._sqrt,
+            "log": self._log10,
+            "ln": self._ln,
+            "fact": self._factorial,
+            "abs": abs,
+            "sin": lambda x: self._trig(math.sin, x),
+            "cos": lambda x: self._trig(math.cos, x),
+            "tan": lambda x: self._trig(math.tan, x),
+            "asin": lambda x: self._inverse_trig(math.asin, x),
+            "acos": lambda x: self._inverse_trig(math.acos, x),
+            "atan": lambda x: self._inverse_trig(math.atan, x),
+        }
+
+    def _trig(self, func, x):
+        if self.angle_mode == "deg":
+            x = math.radians(x)
+        return func(x)
+
+    def _inverse_trig(self, func, x):
+        result = func(x)
+        if self.angle_mode == "deg":
+            result = math.degrees(result)
+        return result
+
+    def _sqrt(self, x):
+        if x < 0:
+            raise ValueError("Cannot take square root of a negative number")
+        return math.sqrt(x)
+
+    def _log10(self, x):
+        if x <= 0:
+            raise ValueError("Logarithm requires a positive number")
+        return math.log10(x)
+
+    def _ln(self, x):
+        if x <= 0:
+            raise ValueError("Logarithm requires a positive number")
+        return math.log(x)
+
+    def _factorial(self, x):
+        if x < 0 or int(x) != x:
+            raise ValueError("Factorial requires a non-negative whole number")
+        if x > 170:
+            raise ValueError("Number too large for factorial")
+        return math.factorial(int(x))
+
+    def evaluate(self, expression, variables=None):
+        self._variables = variables or {}
+
+        expression = expression.strip()
+        expression = expression.replace("×", "*")
+        expression = expression.replace("÷", "/")
+        expression = expression.replace("^", "**")
+        expression = expression.replace("π", "pi")
+        expression = self._insert_implicit_multiplication(expression)
+
         if not expression:
             raise ValueError("Empty expression")
 
@@ -60,18 +115,24 @@ class MathEngine:
         return self._solve(tree.body)
 
     @staticmethod
-    def normalise(expression):
-        return (
-            expression.replace("×", "*")
-            .replace("÷", "/")
-            .replace("^", "**")
-            .replace("π", "pi")
-            .replace("√", "sqrt")
-        )
+    def _insert_implicit_multiplication(expression):
+        """Lets people type '3x' or '2(x+1)' instead of forcing an
+        explicit '3*x' / '2*(x+1)' everywhere - common calculator shorthand."""
+        # digit directly followed by a letter, e.g. 3x -> 3*x, 2pi -> 2*pi
+        expression = re.sub(r"(\d)([a-zA-Z])", r"\1*\2", expression)
+        # digit directly followed by an opening parenthesis, e.g. 2( -> 2*(
+        expression = re.sub(r"(\d)(\()", r"\1*\2", expression)
+        # closing parenthesis directly followed by a digit, letter or '(',
+        # e.g. (x+1)(x-1) -> (x+1)*(x-1), (x+1)2 -> (x+1)*2
+        expression = re.sub(r"(\))([0-9a-zA-Z(])", r"\1*\2", expression)
+        # a bare variable (x or y) directly followed by '(' - but NOT the
+        # last letter of a known function name like sin(, sqrt(, etc.
+        expression = re.sub(r"(?<![a-zA-Z])([xy])\(", r"\1*(", expression)
+        return expression
 
     def _solve(self, node):
         if isinstance(node, ast.Constant):
-            if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            if isinstance(node.value, (int, float)):
                 return node.value
             raise ValueError("Invalid value")
 
@@ -83,11 +144,11 @@ class MathEngine:
             left = self._solve(node.left)
             right = self._solve(node.right)
 
-            if isinstance(node.op, ast.Pow):
-                if abs(right) > 1000:
-                    raise ValueError("Power too large")
-                if left == 0 and right < 0:
-                    raise ZeroDivisionError
+            if isinstance(node.op, (ast.Div, ast.Mod)) and right == 0:
+                raise ZeroDivisionError("Cannot divide by zero")
+
+            if isinstance(node.op, ast.Pow) and abs(right) > 1000:
+                raise ValueError("Power too large")
 
             return operation(left, right)
 
@@ -100,6 +161,8 @@ class MathEngine:
         if isinstance(node, ast.Name):
             if node.id in self.constants:
                 return self.constants[node.id]
+            if node.id in getattr(self, "_variables", {}):
+                return self._variables[node.id]
             raise ValueError("Unknown constant")
 
         if isinstance(node, ast.Call):
@@ -109,260 +172,572 @@ class MathEngine:
             function = self.functions.get(node.func.id)
             if function is None:
                 raise ValueError("Unknown function")
-            if len(node.args) != 1:
-                raise ValueError("Function needs one argument")
 
-            argument = self._solve(node.args[0])
-
-            if node.func.id == "fact":
-                if not isinstance(argument, int) or argument < 0:
-                    raise ValueError("Factorial needs a non-negative integer")
-
-            return function(argument)
+            arguments = [self._solve(arg) for arg in node.args]
+            return function(*arguments)
 
         raise ValueError("Invalid expression")
 
 
-class PolynomialError(ValueError):
-    pass
+# ----------------------------------------------------------------------
+# Number theory (Phase 3) - pure Python, no new dependencies
+# ----------------------------------------------------------------------
+
+def is_prime(n):
+    n = int(n)
+    if n < 2:
+        return False
+    if n in (2, 3):
+        return True
+    if n % 2 == 0:
+        return False
+    i = 3
+    while i * i <= n:
+        if n % i == 0:
+            return False
+        i += 2
+    return True
 
 
-class AlgebraEngine:
-    """Small dependency-free solver for linear/quadratic equations in x."""
+def prime_factorize(n):
+    n = int(n)
+    if n < 2:
+        raise ValueError("Enter a whole number greater than 1")
 
-    @staticmethod
-    def _poly(node):
-        # Coefficients are [constant, x, x^2].
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
-                return [float(node.value), 0.0, 0.0]
-            raise PolynomialError("Invalid number")
+    factors = []
+    d = 2
+    while d * d <= n:
+        count = 0
+        while n % d == 0:
+            n //= d
+            count += 1
+        if count:
+            factors.append((d, count))
+        d += 1
+    if n > 1:
+        factors.append((n, 1))
+    return factors
 
-        if isinstance(node, ast.Name):
-            if node.id == "x":
-                return [0.0, 1.0, 0.0]
-            raise PolynomialError("Only x is allowed")
 
-        if isinstance(node, ast.UnaryOp):
-            values = AlgebraEngine._poly(node.operand)
-            if isinstance(node.op, ast.USub):
-                return [-v for v in values]
-            if isinstance(node.op, ast.UAdd):
-                return values
-            raise PolynomialError("Unsupported sign")
+def format_prime_factors(factors):
+    return " x ".join(
+        f"{base}^{exp}" if exp > 1 else f"{base}"
+        for base, exp in factors
+    )
 
-        if isinstance(node, ast.BinOp):
-            left = AlgebraEngine._poly(node.left)
-            right = AlgebraEngine._poly(node.right)
 
-            if isinstance(node.op, (ast.Add, ast.Sub)):
-                sign = 1 if isinstance(node.op, ast.Add) else -1
-                return [left[i] + sign * right[i] for i in range(3)]
+def gcd_of(a, b):
+    return math.gcd(int(a), int(b))
 
-            if isinstance(node.op, ast.Mult):
-                result = [0.0, 0.0, 0.0]
-                for i in range(3):
-                    for j in range(3):
-                        if abs(left[i]) < 1e-12 or abs(right[j]) < 1e-12:
-                            continue
-                        if i + j > 2:
-                            raise PolynomialError("Degree greater than 2")
-                        result[i + j] += left[i] * right[j]
-                return result
 
-            if isinstance(node.op, ast.Div):
-                if abs(right[1]) > 1e-12 or abs(right[2]) > 1e-12:
-                    raise PolynomialError("Division by x is not supported")
-                if abs(right[0]) < 1e-12:
-                    raise ZeroDivisionError
-                return [v / right[0] for v in left]
+def lcm_of(a, b):
+    a, b = int(a), int(b)
+    if a == 0 or b == 0:
+        return 0
+    return abs(a * b) // math.gcd(a, b)
 
-            if isinstance(node.op, ast.Pow):
-                if any(abs(v) > 1e-12 for v in right[1:]):
-                    raise PolynomialError("Exponent must be a number")
-                exponent = right[0]
-                if exponent < 0 or not exponent.is_integer() or exponent > 2:
-                    raise PolynomialError("Only powers 0, 1 and 2 are supported")
-                result = [1.0, 0.0, 0.0]
-                for _ in range(int(exponent)):
-                    result = AlgebraEngine._multiply(result, left)
-                return result
 
-            raise PolynomialError("Unsupported operator")
+def simplify_fraction(numerator, denominator):
+    if denominator == 0:
+        raise ZeroDivisionError("Cannot divide by zero")
+    frac = Fraction(int(numerator), int(denominator))
+    return frac.numerator, frac.denominator
 
-        raise PolynomialError("Invalid algebra expression")
 
-    @staticmethod
-    def _multiply(a, b):
-        result = [0.0, 0.0, 0.0]
-        for i in range(3):
-            for j in range(3):
-                if abs(a[i]) < 1e-12 or abs(b[j]) < 1e-12:
+# ----------------------------------------------------------------------
+# Algebra - equation solving via numerical coefficient extraction
+# (no symbolic engine needed: we sample the user's expression at a few
+# points and fit the polynomial coefficients from those samples)
+# ----------------------------------------------------------------------
+
+def _equation_sides(equation):
+    if "=" not in equation:
+        raise ValueError("Equation must contain '='")
+    left, right = equation.split("=", 1)
+    return left.strip(), right.strip()
+
+
+def solve_linear(engine, equation):
+    left, right = _equation_sides(equation)
+
+    def f(x):
+        return engine.evaluate(f"({left})-({right})", variables={"x": x})
+
+    y0 = f(0)
+    y1 = f(1)
+    y2 = f(2)
+
+    a = y1 - y0
+    if abs((y2 - y1) - a) > 1e-6 * (abs(a) + 1):
+        raise ValueError("That doesn't look linear in x")
+
+    if abs(a) < 1e-12:
+        if abs(y0) < 1e-9:
+            raise ValueError("Infinitely many solutions (always true)")
+        raise ValueError("No solution")
+
+    return -y0 / a
+
+
+def solve_quadratic(engine, equation):
+    left, right = _equation_sides(equation)
+
+    def f(x):
+        return engine.evaluate(f"({left})-({right})", variables={"x": x})
+
+    y_m1 = f(-1)
+    y0 = f(0)
+    y1 = f(1)
+
+    coeff_a = (y1 - 2 * y0 + y_m1) / 2
+    coeff_b = (y1 - y_m1) / 2
+    coeff_c = y0
+
+    if abs(coeff_a) < 1e-9:
+        if abs(coeff_b) < 1e-12:
+            raise ValueError("No unique solution")
+        return [-coeff_c / coeff_b]
+
+    discriminant = coeff_b * coeff_b - 4 * coeff_a * coeff_c
+    if discriminant < 0:
+        raise ValueError("No real roots")
+
+    sqrt_d = math.sqrt(discriminant)
+    x1 = (-coeff_b + sqrt_d) / (2 * coeff_a)
+    x2 = (-coeff_b - sqrt_d) / (2 * coeff_a)
+    return sorted({round(x1, 10), round(x2, 10)})
+
+
+def solve_simultaneous(engine, equation1, equation2):
+    def make_f(equation):
+        left, right = _equation_sides(equation)
+
+        def f(x, y):
+            return engine.evaluate(f"({left})-({right})", variables={"x": x, "y": y})
+
+        return f
+
+    f1 = make_f(equation1)
+    f2 = make_f(equation2)
+
+    c1 = -f1(0, 0)
+    a1 = f1(1, 0) - f1(0, 0)
+    b1 = f1(0, 1) - f1(0, 0)
+
+    c2 = -f2(0, 0)
+    a2 = f2(1, 0) - f2(0, 0)
+    b2 = f2(0, 1) - f2(0, 0)
+
+    det = a1 * b2 - a2 * b1
+    if abs(det) < 1e-12:
+        raise ValueError("No unique solution (equations are parallel or identical)")
+
+    x = (c1 * b2 - c2 * b1) / det
+    y = (a1 * c2 - a2 * c1) / det
+    return x, y
+
+
+# ----------------------------------------------------------------------
+# Calculus - numerical methods (Phase 4). No symbolic engine, so results
+# are close numerical approximations rather than exact algebraic forms.
+# ----------------------------------------------------------------------
+
+def numerical_derivative(engine, expression, x0, h=1e-5):
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    return (f(x0 + h) - f(x0 - h)) / (2 * h)
+
+
+def numerical_second_derivative(engine, expression, x0, h=1e-4):
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    return (f(x0 + h) - 2 * f(x0) + f(x0 - h)) / (h * h)
+
+
+def numerical_integral(engine, expression, a, b, n=1000):
+    if n % 2 == 1:
+        n += 1
+
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    h = (b - a) / n
+    total = f(a) + f(b)
+    for i in range(1, n):
+        x = a + i * h
+        total += (4 if i % 2 == 1 else 2) * f(x)
+    return total * h / 3
+
+
+def numerical_limit(engine, expression, x0, h=1e-6):
+    def f(x):
+        return engine.evaluate(expression, variables={"x": x})
+
+    left = f(x0 - h)
+    right = f(x0 + h)
+
+    if abs(left - right) > 1e-3 * (abs(left) + abs(right) + 1):
+        raise ValueError("Limit does not appear to converge from both sides")
+
+    return (left + right) / 2
+
+
+# ----------------------------------------------------------------------
+# Matrices & Vectors (Phase 5) - pure Python, Gaussian elimination etc.
+# ----------------------------------------------------------------------
+
+def parse_matrix(text):
+    text = text.strip()
+    if not text:
+        raise ValueError("Enter a matrix, e.g. 1,2;3,4")
+
+    rows = [r for r in text.split(";") if r.strip() != ""]
+    matrix = []
+    width = None
+    for row in rows:
+        values = [float(v.strip()) for v in row.split(",")]
+        if width is None:
+            width = len(values)
+        elif len(values) != width:
+            raise ValueError("Every row must have the same number of values")
+        matrix.append(values)
+    return matrix
+
+
+def matrix_add(a, b, sign=1):
+    if len(a) != len(b) or len(a[0]) != len(b[0]):
+        raise ValueError("Matrices must be the same size")
+    return [
+        [a[i][j] + sign * b[i][j] for j in range(len(a[0]))]
+        for i in range(len(a))
+    ]
+
+
+def matrix_multiply(a, b):
+    if len(a[0]) != len(b):
+        raise ValueError("Columns of A must match rows of B")
+    rows_a, cols_a, cols_b = len(a), len(a[0]), len(b[0])
+    result = [[0.0] * cols_b for _ in range(rows_a)]
+    for i in range(rows_a):
+        for j in range(cols_b):
+            result[i][j] = sum(a[i][k] * b[k][j] for k in range(cols_a))
+    return result
+
+
+def matrix_transpose(a):
+    return [list(row) for row in zip(*a)]
+
+
+def matrix_determinant(a):
+    n = len(a)
+    if any(len(row) != n for row in a):
+        raise ValueError("Determinant requires a square matrix")
+
+    if n == 1:
+        return a[0][0]
+    if n == 2:
+        return a[0][0] * a[1][1] - a[0][1] * a[1][0]
+
+    total = 0.0
+    for col in range(n):
+        minor = [row[:col] + row[col + 1:] for row in a[1:]]
+        sign = 1 if col % 2 == 0 else -1
+        total += sign * a[0][col] * matrix_determinant(minor)
+    return total
+
+
+def matrix_inverse(a):
+    n = len(a)
+    if any(len(row) != n for row in a):
+        raise ValueError("Inverse requires a square matrix")
+
+    aug = [row[:] + [1.0 if i == j else 0.0 for j in range(n)] for i, row in enumerate(a)]
+
+    for col in range(n):
+        pivot_row = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot_row][col]) < 1e-12:
+            raise ValueError("Matrix is singular (no inverse)")
+        aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+
+        pivot = aug[col][col]
+        aug[col] = [v / pivot for v in aug[col]]
+
+        for r in range(n):
+            if r != col:
+                factor = aug[r][col]
+                aug[r] = [aug[r][k] - factor * aug[col][k] for k in range(2 * n)]
+
+    return [row[n:] for row in aug]
+
+
+def matrix_rank(a):
+    m = [row[:] for row in a]
+    rows, cols = len(m), len(m[0])
+    rank = 0
+    for col in range(cols):
+        pivot_row = None
+        for r in range(rank, rows):
+            if abs(m[r][col]) > 1e-9:
+                pivot_row = r
+                break
+        if pivot_row is None:
+            continue
+        m[rank], m[pivot_row] = m[pivot_row], m[rank]
+        pivot = m[rank][col]
+        m[rank] = [v / pivot for v in m[rank]]
+        for r in range(rows):
+            if r != rank:
+                factor = m[r][col]
+                m[r] = [m[r][k] - factor * m[rank][k] for k in range(cols)]
+        rank += 1
+        if rank == rows:
+            break
+    return rank
+
+
+def format_plain_number(v):
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v)
+
+
+def format_matrix(m):
+    return "\n".join(
+        "[" + ", ".join(format_plain_number(v) for v in row) + "]"
+        for row in m
+    )
+
+
+def parse_vector(text):
+    text = text.strip()
+    if not text:
+        raise ValueError("Enter a vector, e.g. 1,2,3")
+    return [float(v.strip()) for v in text.split(",")]
+
+
+def vector_add(a, b, sign=1):
+    if len(a) != len(b):
+        raise ValueError("Vectors must be the same length")
+    return [a[i] + sign * b[i] for i in range(len(a))]
+
+
+def vector_dot(a, b):
+    if len(a) != len(b):
+        raise ValueError("Vectors must be the same length")
+    return sum(a[i] * b[i] for i in range(len(a)))
+
+
+def vector_cross(a, b):
+    if len(a) != 3 or len(b) != 3:
+        raise ValueError("Cross product requires two 3D vectors")
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def vector_magnitude(a):
+    return math.sqrt(sum(v * v for v in a))
+
+
+def vector_unit(a):
+    mag = vector_magnitude(a)
+    if mag == 0:
+        raise ValueError("Cannot normalize a zero vector")
+    return [v / mag for v in a]
+
+
+def format_vector(v):
+    return "(" + ", ".join(format_plain_number(x) for x in v) + ")"
+
+
+# ----------------------------------------------------------------------
+# Unit conversions (Phase 7) - pure Python conversion factor tables
+# ----------------------------------------------------------------------
+
+LENGTH_UNITS = {
+    "m": 1.0, "km": 1000.0, "cm": 0.01, "mm": 0.001,
+    "mile": 1609.344, "yard": 0.9144, "ft": 0.3048, "in": 0.0254,
+}
+MASS_UNITS = {
+    "kg": 1.0, "g": 0.001, "mg": 0.000001,
+    "lb": 0.45359237, "oz": 0.028349523125, "ton": 1000.0,
+}
+TIME_UNITS = {
+    "s": 1.0, "ms": 0.001, "min": 60.0, "hour": 3600.0, "day": 86400.0,
+}
+AREA_UNITS = {
+    "m2": 1.0, "km2": 1000000.0, "cm2": 0.0001, "hectare": 10000.0,
+    "acre": 4046.8564224, "sqft": 0.09290304, "sqmile": 2589988.110336,
+}
+VOLUME_UNITS = {
+    "L": 1.0, "mL": 0.001, "m3": 1000.0, "gallon": 3.785411784,
+    "quart": 0.946352946, "cup": 0.2365882365, "floz": 0.0295735295625,
+}
+SPEED_UNITS = {
+    "m/s": 1.0, "km/h": 0.277777778, "mph": 0.44704, "knot": 0.514444444,
+}
+PRESSURE_UNITS = {
+    "Pa": 1.0, "bar": 100000.0, "atm": 101325.0,
+    "psi": 6894.757293168, "mmHg": 133.322387415,
+}
+ENERGY_UNITS = {
+    "J": 1.0, "cal": 4.184, "kJ": 1000.0, "kWh": 3600000.0, "BTU": 1055.05585262,
+}
+DATA_UNITS = {
+    "byte": 1.0, "bit": 0.125,
+    "KB": 1024.0, "MB": 1024.0 ** 2, "GB": 1024.0 ** 3, "TB": 1024.0 ** 4,
+}
+ANGLE_UNITS = {
+    "deg": 1.0, "rad": 180.0 / math.pi, "grad": 0.9,
+}
+
+CONVERSION_CATEGORIES = {
+    "Length": LENGTH_UNITS,
+    "Mass": MASS_UNITS,
+    "Time": TIME_UNITS,
+    "Area": AREA_UNITS,
+    "Volume": VOLUME_UNITS,
+    "Speed": SPEED_UNITS,
+    "Temperature": None,  # handled specially, see convert_temperature
+    "Pressure": PRESSURE_UNITS,
+    "Energy": ENERGY_UNITS,
+    "Data": DATA_UNITS,
+    "Angle": ANGLE_UNITS,
+}
+
+TEMPERATURE_UNITS = ["C", "F", "K"]
+
+
+def convert_units(category, value, from_unit, to_unit):
+    if category == "Temperature":
+        return convert_temperature(value, from_unit, to_unit)
+
+    units = CONVERSION_CATEGORIES[category]
+    base_value = value * units[from_unit]
+    return base_value / units[to_unit]
+
+
+def convert_temperature(value, from_unit, to_unit):
+    if from_unit == "C":
+        celsius = value
+    elif from_unit == "F":
+        celsius = (value - 32) * 5.0 / 9.0
+    elif from_unit == "K":
+        celsius = value - 273.15
+    else:
+        raise ValueError("Unknown temperature unit")
+
+    if to_unit == "C":
+        return celsius
+    if to_unit == "F":
+        return celsius * 9.0 / 5.0 + 32
+    if to_unit == "K":
+        return celsius + 273.15
+    raise ValueError("Unknown temperature unit")
+
+
+OPERATOR_CHARS = {"+", "-", "×", "÷", "^", "%"}
+
+SCIENTIFIC_COLOR_LABELS = {
+    "sin", "cos", "tan", "asin", "acos", "atan",
+    "√", "log", "ln", "π", "e", "n!",
+    "x²", "x³", "xʸ", "1/x",
+}
+
+
+class GraphCanvas(Widget):
+    """Draws y = f(x) using plain Kivy graphics primitives - no
+    matplotlib or any other plotting dependency needed."""
+
+    def __init__(self, engine, expression, x_min=-10, x_max=10, **kwargs):
+        super().__init__(**kwargs)
+        self.engine = engine
+        self.expression = expression
+        self.x_min = x_min
+        self.x_max = x_max
+        self.error = None
+        self.bind(size=self.redraw, pos=self.redraw)
+        self.redraw()
+
+    def redraw(self, *args):
+        self.canvas.clear()
+        self.error = None
+
+        width, height = self.size
+        origin_x, origin_y = self.pos
+
+        if width <= 0 or height <= 0:
+            return
+
+        samples = 200
+        points_data = []
+        y_values = []
+
+        for i in range(samples + 1):
+            x = self.x_min + (self.x_max - self.x_min) * i / samples
+            try:
+                y = self.engine.evaluate(self.expression, variables={"x": x})
+            except Exception:
+                y = None
+
+            if isinstance(y, complex):
+                y = None
+            if isinstance(y, float) and (math.isnan(y) or math.isinf(y)):
+                y = None
+
+            points_data.append((x, y))
+            if y is not None:
+                y_values.append(y)
+
+        if not y_values:
+            self.error = "Could not plot this function over that range"
+            return
+
+        y_min, y_max = min(y_values), max(y_values)
+        if y_min == y_max:
+            y_min -= 1
+            y_max += 1
+        pad = (y_max - y_min) * 0.1
+        y_min -= pad
+        y_max += pad
+
+        def to_screen(x, y):
+            sx = origin_x + (x - self.x_min) / (self.x_max - self.x_min) * width
+            sy = origin_y + (y - y_min) / (y_max - y_min) * height
+            return sx, sy
+
+        with self.canvas:
+            Color(0.35, 0.35, 0.4, 1)
+
+            if y_min <= 0 <= y_max:
+                ax0, ay0 = to_screen(self.x_min, 0)
+                ax1, ay1 = to_screen(self.x_max, 0)
+                Line(points=[ax0, ay0, ax1, ay1], width=1)
+
+            if self.x_min <= 0 <= self.x_max:
+                bx0, by0 = to_screen(0, y_min)
+                bx1, by1 = to_screen(0, y_max)
+                Line(points=[bx0, by0, bx1, by1], width=1)
+
+            Color(0.2, 0.75, 0.95, 1)
+            segment_points = []
+            for x, y in points_data:
+                if y is None:
+                    if len(segment_points) >= 4:
+                        Line(points=segment_points, width=1.5)
+                    segment_points = []
                     continue
-                if i + j > 2:
-                    raise PolynomialError("Degree greater than 2")
-                result[i + j] += a[i] * b[j]
-        return result
+                sx, sy = to_screen(x, y)
+                segment_points.extend([sx, sy])
 
-    def coefficients(self, equation):
-        if "=" not in equation:
-            raise PolynomialError("Use = between the two sides")
-
-        left_text, right_text = equation.split("=", 1)
-        if not left_text.strip() or not right_text.strip():
-            raise PolynomialError("Both sides of the equation are required")
-
-        left = self._poly(ast.parse(MathEngine.normalise(left_text), mode="eval").body)
-        right = self._poly(ast.parse(MathEngine.normalise(right_text), mode="eval").body)
-        return [left[i] - right[i] for i in range(3)]
-
-    @staticmethod
-    def clean(value):
-        if abs(value) < 1e-10:
-            return 0.0
-        return value
-
-    def solve_linear(self, equation):
-        c, b, a = self.coefficients(equation)
-        a, b, c = self.clean(a), self.clean(b), self.clean(c)
-
-        if a != 0:
-            raise PolynomialError("This is not a linear equation")
-        if b == 0:
-            if c == 0:
-                return "Infinitely many solutions."
-            return "No solution."
-
-        x = -c / b
-        return f"x = {self.format_number(x)}"
-
-    def solve_quadratic(self, equation):
-        c, b, a = self.coefficients(equation)
-        a, b, c = self.clean(a), self.clean(b), self.clean(c)
-
-        if a == 0:
-            if b == 0:
-                return "No quadratic solution."
-            return f"Linear equation: x = {self.format_number(-c / b)}"
-
-        discriminant = b * b - 4 * a * c
-
-        if discriminant > 0:
-            root = math.sqrt(discriminant)
-            x1 = (-b + root) / (2 * a)
-            x2 = (-b - root) / (2 * a)
-            return (
-                f"x₁ = {self.format_number(x1)}\n"
-                f"x₂ = {self.format_number(x2)}"
-            )
-
-        if abs(discriminant) < 1e-10:
-            x = -b / (2 * a)
-            return f"x = {self.format_number(x)}"
-
-        real = -b / (2 * a)
-        imaginary = math.sqrt(-discriminant) / abs(2 * a)
-        return (
-            f"x₁ = {self.format_number(real)} + "
-            f"{self.format_number(imaginary)}i\n"
-            f"x₂ = {self.format_number(real)} - "
-            f"{self.format_number(imaginary)}i"
-        )
-
-    @staticmethod
-    def format_number(number):
-        if abs(number - round(number)) < 1e-10:
-            return str(int(round(number)))
-        return str(round(number, 10)).rstrip("0").rstrip(".")
-
-
-class SimultaneousEngine:
-    """Dependency-free solver for two linear equations in x and y."""
-
-    @staticmethod
-    def _linear(node):
-        # (x coefficient, y coefficient, constant)
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
-                return 0.0, 0.0, float(node.value)
-            raise PolynomialError("Invalid number")
-
-        if isinstance(node, ast.Name):
-            if node.id == "x":
-                return 1.0, 0.0, 0.0
-            if node.id == "y":
-                return 0.0, 1.0, 0.0
-            raise PolynomialError("Only x and y are allowed")
-
-        if isinstance(node, ast.UnaryOp):
-            x, y, c = SimultaneousEngine._linear(node.operand)
-            if isinstance(node.op, ast.USub):
-                return -x, -y, -c
-            if isinstance(node.op, ast.UAdd):
-                return x, y, c
-            raise PolynomialError("Unsupported sign")
-
-        if isinstance(node, ast.BinOp):
-            lx, ly, lc = SimultaneousEngine._linear(node.left)
-            rx, ry, rc = SimultaneousEngine._linear(node.right)
-
-            if isinstance(node.op, ast.Add):
-                return lx + rx, ly + ry, lc + rc
-            if isinstance(node.op, ast.Sub):
-                return lx - rx, ly - ry, lc - rc
-
-            if isinstance(node.op, ast.Mult):
-                left_vars = abs(lx) > 1e-12 or abs(ly) > 1e-12
-                right_vars = abs(rx) > 1e-12 or abs(ry) > 1e-12
-                if left_vars and right_vars:
-                    raise PolynomialError("Products of x and y are not supported")
-                if left_vars:
-                    return lx * rc, ly * rc, lc * rc
-                return rx * lc, ry * lc, rc * lc
-
-            if isinstance(node.op, ast.Div):
-                if abs(rx) > 1e-12 or abs(ry) > 1e-12:
-                    raise PolynomialError("Division by x or y is not supported")
-                if abs(rc) < 1e-12:
-                    raise ZeroDivisionError
-                return lx / rc, ly / rc, lc / rc
-
-            raise PolynomialError("Only linear operations are supported")
-
-        raise PolynomialError("Invalid simultaneous equation")
-
-    def coefficients(self, equation):
-        if "=" not in equation:
-            raise PolynomialError("Use = between the two sides")
-
-        left_text, right_text = equation.split("=", 1)
-        left = self._linear(ast.parse(MathEngine.normalise(left_text), mode="eval").body)
-        right = self._linear(ast.parse(MathEngine.normalise(right_text), mode="eval").body)
-
-        # ax + by + c = 0
-        return left[0] - right[0], left[1] - right[1], left[2] - right[2]
-
-    @staticmethod
-    def format_number(number):
-        if abs(number - round(number)) < 1e-10:
-            return str(int(round(number)))
-        return str(round(number, 10)).rstrip("0").rstrip(".")
-
-    def solve(self, equation1, equation2):
-        a1, b1, c1 = self.coefficients(equation1)
-        a2, b2, c2 = self.coefficients(equation2)
-
-        determinant = a1 * b2 - a2 * b1
-
-        if abs(determinant) < 1e-12:
-            if abs(a1 * c2 - a2 * c1) < 1e-12 and abs(b1 * c2 - b2 * c1) < 1e-12:
-                return "Infinitely many solutions."
-            return "No unique solution."
-
-        x = (b1 * c2 - b2 * c1) / determinant
-        y = (c1 * a2 - c2 * a1) / determinant
-
-        return f"x = {self.format_number(x)}\ny = {self.format_number(y)}"
+            if len(segment_points) >= 4:
+                Line(points=segment_points, width=1.5)
 
 
 class Calculator(BoxLayout):
@@ -376,10 +751,11 @@ class Calculator(BoxLayout):
         self.expression = ""
         self.memory = 0
         self.engine = MathEngine()
-        self.algebra = AlgebraEngine()
-        self.simultaneous = SimultaneousEngine()
         self.history = []
         self.just_calculated = False
+
+        self.memory_label = None
+        self.mode_button = None
 
         title = Label(
             text="MATHEMATICAL CALCULATOR",
@@ -396,7 +772,7 @@ class Calculator(BoxLayout):
         )
 
         version = Label(
-            text=f"Version {VERSION}",
+            text=f"Version {APP_VERSION}",
             font_size="12sp",
             halign="left",
             valign="middle",
@@ -444,6 +820,17 @@ class Calculator(BoxLayout):
         self.display.bind(size=self.update_text_size)
         self.add_widget(self.display)
 
+        self.preview_label = Label(
+            text="",
+            size_hint_y=0.05,
+            font_size="16sp",
+            halign="right",
+            valign="middle",
+            color=(0.55, 0.55, 0.6, 1),
+        )
+        self.preview_label.bind(size=self.update_text_size)
+        self.add_widget(self.preview_label)
+
         buttons = [
             ["C", "⌫", "(", ")", "More"],
             ["7", "8", "9", "%", "÷"],
@@ -475,149 +862,402 @@ class Calculator(BoxLayout):
 
         self.add_widget(grid)
 
+        self.load_state()
+
+    # ------------------------------------------------------------------
+    # Persistence - memory & history survive an app restart
+    # ------------------------------------------------------------------
+
+    def _state_file_path(self):
+        app = App.get_running_app()
+        if app is None:
+            return None
+        try:
+            os.makedirs(app.user_data_dir, exist_ok=True)
+        except Exception:
+            return None
+        return os.path.join(app.user_data_dir, "calculator_state.json")
+
+    def save_state(self):
+        path = self._state_file_path()
+        if not path:
+            return
+        try:
+            with open(path, "w") as f:
+                json.dump({"memory": self.memory, "history": self.history}, f)
+        except Exception:
+            pass
+
+    def load_state(self):
+        path = self._state_file_path()
+        if not path or not os.path.exists(path):
+            return
+
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        self.memory = data.get("memory", 0)
+        raw_history = data.get("history", [])
+        self.history = [
+            tuple(item) for item in raw_history
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        ]
+
+        self.update_memory_indicator()
+
+        if self.history:
+            self.history_label.text = "\n".join(
+                f"{expr} = {self.format_number(ans)}"
+                for expr, ans in self.history[-3:]
+            )
+
+    # ------------------------------------------------------------------
+    # Layout helpers
+    # ------------------------------------------------------------------
+
     def update_text_size(self, widget, size):
         widget.text_size = size
+
+    def make_sheet_popup(self, title, content, height=0.5):
+        """A popup that behaves like a keyboard sheet - docked to the
+        bottom of the screen, full width, and only as tall as it needs
+        to be - instead of a centered box covering most of the screen."""
+        return Popup(
+            title=title,
+            content=content,
+            size_hint=(1, height),
+            pos_hint={"x": 0, "y": 0},
+            auto_dismiss=True,
+        )
 
     def button_color(self, text):
         if text == "=":
             return (0.1, 0.55, 0.9, 1)
-        if text in ["C", "⌫"]:
+
+        if text in ("C", "⌫"):
             return (0.7, 0.15, 0.18, 1)
-        if text in ["+", "-", "×", "÷", "^", "%"]:
+
+        if text in ("DEG", "RAD"):
+            return (0.1, 0.55, 0.9, 1)
+
+        if text in OPERATOR_CHARS:
             return (0.25, 0.25, 0.55, 1)
-        if text in [
-            "sin", "cos", "tan", "√",
-            "log", "ln", "π", "e", "!",
-        ]:
+
+        if text in SCIENTIFIC_COLOR_LABELS:
             return (0.18, 0.35, 0.35, 1)
+
         return (0.15, 0.15, 0.18, 1)
 
-    def reset_error(self, value):
+    # ------------------------------------------------------------------
+    # Main keypad dispatch
+    # ------------------------------------------------------------------
+
+    def button_pressed(self, button):
+        value = button.text
+
         if self.display.text in ("Math Error", "Cannot divide by zero"):
             if value not in ("C", "⌫"):
                 self.expression = ""
                 self.display.text = "0"
 
-    def button_pressed(self, button):
-        value = button.text
-        self.reset_error(value)
-
         if value == "C":
-            self.expression = ""
-            self.display.text = "0"
-            self.just_calculated = False
+            self.clear_all()
             return
 
         if value == "⌫":
-            self.expression = self.expression[:-1]
-            self.just_calculated = False
-            self.update_display()
+            self.backspace()
             return
 
         if value == "=":
             self.calculate()
             return
 
-        if value == "HIST":
-            self.show_history(button)
+        if value == "More":
+            self.open_more_menu()
             return
 
-        if value == "More":
-            self.show_more_menu(button)
+        if value == "HIST":
+            self.show_history()
             return
 
         if value == "±":
-            if self.expression:
-                self.expression = f"-({self.expression})"
-            self.just_calculated = False
+            self.toggle_sign()
+            return
+
+        if value == ".":
+            self.append_decimal()
+            return
+
+        if value in OPERATOR_CHARS:
+            self.append_operator(value)
+            return
+
+        if value in ("(", ")"):
+            self.reset_if_calculated()
+            self.expression += value
             self.update_display()
             return
 
-        if self.just_calculated and (value.isdigit() or value == "."):
-            self.expression = value
-            self.just_calculated = False
-        else:
-            self.append_input(value)
-
-        self.update_display()
-
-    def append_input(self, value):
-        replacements = {
-            "×": "*",
-            "÷": "/",
-        }
-        self.expression += replacements.get(value, value)
-
-    def insert_scientific(self, value):
-        if value == "!":
-            if self.expression:
-                self.expression = f"fact({self.expression})"
+        if value.isdigit():
+            self.reset_if_calculated()
+            self.expression += value
+            self.update_display()
             return
 
-        replacements = {
-            "sin": "sin(",
-            "cos": "cos(",
-            "tan": "tan(",
-            "√": "sqrt(",
-            "log": "log(",
-            "ln": "ln(",
-            "^": "^",
-            "%": "%",
-            "π": "π",
-            "e": "e",
-            "()": "()",
-        }
-
-        insertion = replacements.get(value, value)
-
-        if self.just_calculated and value not in ("^", "%"):
-            self.just_calculated = False
-
-        if value == "()":
-            self.expression += "()"
-        else:
-            self.expression += insertion
-
+        # Fallback for any unexpected label - just append it as typed.
+        self.reset_if_calculated()
+        self.expression += value
         self.update_display()
 
-    def show_about(self, instance):
-        layout = BoxLayout(
+    # ------------------------------------------------------------------
+    # Expression editing helpers (Phase 1 reliability)
+    # ------------------------------------------------------------------
+
+    def reset_if_calculated(self):
+        if self.just_calculated:
+            self.expression = ""
+            self.just_calculated = False
+
+    def clear_all(self):
+        self.expression = ""
+        self.display.text = "0"
+        self.preview_label.text = ""
+        self.just_calculated = False
+
+    def backspace(self):
+        self.expression = self.expression[:-1]
+        self.just_calculated = False
+        self.update_display()
+
+    def append_decimal(self):
+        self.reset_if_calculated()
+
+        segment = re.split(r"[+\-×÷^%(]", self.expression)[-1] if self.expression else ""
+        if "." in segment:
+            return
+
+        self.expression += "0." if not segment else "."
+        self.update_display()
+
+    def append_operator(self, op):
+        if not self.expression:
+            if op == "-":
+                self.expression = "-"
+                self.update_display()
+            return
+
+        last = self.expression[-1]
+
+        if last in OPERATOR_CHARS:
+            if op == "-" and last != "-":
+                # allow forming a negative number, e.g. 5x-3
+                self.expression += op
+            else:
+                self.expression = self.expression[:-1] + op
+        else:
+            self.expression += op
+
+        self.just_calculated = False
+        self.update_display()
+
+    def toggle_sign(self):
+        self.reset_if_calculated()
+
+        match = re.search(r"(-?\d*\.?\d+)$", self.expression)
+        if not match:
+            if not self.expression:
+                self.expression = "-"
+                self.update_display()
+            return
+
+        number = match.group(1)
+        start = match.start(1)
+
+        if number.startswith("-"):
+            new_number = number[1:]
+        else:
+            new_number = "-" + number
+
+        self.expression = self.expression[:start] + new_number + self.expression[match.end(1):]
+        self.update_display()
+
+    def wrap_whole(self, prefix, suffix=")"):
+        if self.expression:
+            self.expression = f"{prefix}{self.expression}{suffix}"
+        else:
+            self.expression = prefix
+        self.just_calculated = False
+        self.update_display()
+
+    def append_power(self, digit):
+        self.append_operator("^")
+        self.expression += digit
+        self.update_display()
+
+    def update_display(self):
+        self.display.text = self.expression or "0"
+        self.update_preview()
+
+    def update_preview(self):
+        """Shows a live '= result' preview as the expression is typed,
+        without requiring '=' to be pressed. Silently shows nothing if
+        the expression isn't complete/valid yet (e.g. still mid-typing)."""
+        if self.just_calculated or not self.expression:
+            self.preview_label.text = ""
+            return
+
+        try:
+            result = self.engine.evaluate(self.expression)
+
+            if isinstance(result, float) and result.is_integer():
+                result = int(result)
+
+            formatted = self.format_number(result)
+
+            # Don't show a redundant preview for a bare number that
+            # hasn't had any operation applied to it yet.
+            if formatted == self.expression:
+                self.preview_label.text = ""
+            else:
+                self.preview_label.text = f"= {formatted}"
+        except Exception:
+            self.preview_label.text = ""
+
+    # ------------------------------------------------------------------
+    # Calculation
+    # ------------------------------------------------------------------
+
+    def calculate(self):
+        if not self.expression:
+            return
+
+        try:
+            original = self.expression
+            result = self.engine.evaluate(self.expression)
+
+            if isinstance(result, float) and result.is_integer():
+                result = int(result)
+
+            if isinstance(result, float):
+                result = round(result, 10)
+
+            self.history.append((original, result))
+            self.history = self.history[-50:]
+
+            self.expression = self.format_number(result)
+            self.display.text = self.expression
+            self.preview_label.text = ""
+            self.just_calculated = True
+
+            self.history_label.text = "\n".join(
+                f"{expr} = {self.format_number(ans)}"
+                for expr, ans in self.history[-3:]
+            )
+
+            self.save_state()
+
+        except ZeroDivisionError:
+            self.display.text = "Cannot divide by zero"
+            self.preview_label.text = ""
+            self.expression = ""
+            self.just_calculated = False
+
+        except (ValueError, SyntaxError, TypeError, OverflowError):
+            self.display.text = "Math Error"
+            self.preview_label.text = ""
+            self.expression = ""
+            self.just_calculated = False
+
+        except Exception:
+            self.display.text = "Math Error"
+            self.preview_label.text = ""
+            self.expression = ""
+            self.just_calculated = False
+
+    def format_number(self, number):
+        if isinstance(number, float) and number.is_integer():
+            number = int(number)
+
+        if isinstance(number, float):
+            if number != 0 and (abs(number) >= 1e9 or abs(number) < 1e-6):
+                return f"{number:.6e}"
+            return str(number)
+
+        if isinstance(number, int) and abs(number) >= 10 ** 15:
+            return f"{float(number):.6e}"
+
+        return str(number)
+
+    # ------------------------------------------------------------------
+    # More menu (Scientific / Memory / History)
+    # ------------------------------------------------------------------
+
+    def open_more_menu(self):
+        outer = BoxLayout(
             orientation="vertical",
-            spacing=dp(10),
+            spacing=dp(6),
             padding=dp(10),
         )
 
-        about_label = Label(
-            text=(
-                "MATHEMATICAL CALCULATOR\n\n"
-                f"Version {VERSION}\n\n"
-                "Created by Quareeb\n\n"
-                "Basic, scientific and algebra tools."
-            ),
-            halign="center",
-            valign="middle",
+        scroll = ScrollView()
+        menu_grid = GridLayout(
+            cols=1,
+            spacing=dp(6),
+            size_hint_y=None,
         )
-        about_label.bind(size=self.update_text_size)
+        menu_grid.bind(minimum_height=menu_grid.setter("height"))
+        scroll.add_widget(menu_grid)
+        outer.add_widget(scroll)
 
-        close_button = Button(
+        close = Button(
             text="Close",
             size_hint_y=None,
             height=dp(45),
         )
+        outer.add_widget(close)
 
-        layout.add_widget(about_label)
-        layout.add_widget(close_button)
+        popup = self.make_sheet_popup("More", outer, height=0.65)
 
-        popup = Popup(
-            title="About",
-            content=layout,
-            size_hint=(0.8, 0.5),
-        )
+        tools = [
+            ("\U0001F9EE Scientific", self.show_scientific),
+            ("\U0001F522 Number Theory", self.show_number_theory),
+            ("\U0001F4D0 Algebra", self.show_algebra),
+            ("\u222B Calculus", self.show_calculus),
+            ("\U0001F9EE Matrices & Vectors", self.show_matrices_vectors),
+            ("\U0001F4CF Conversions", self.show_conversions),
+            ("\U0001F4C8 Graph", self.show_graph),
+            ("\U0001F4BE Memory", self.show_memory),
+            ("\U0001F4DC History", self.show_history),
+        ]
 
-        close_button.bind(on_press=popup.dismiss)
+        for label, opener in tools:
+            button = Button(
+                text=label,
+                size_hint_y=None,
+                height=dp(45),
+            )
+
+            def make_handler(fn):
+                def handler(instance):
+                    popup.dismiss()
+                    fn()
+                return handler
+
+            button.bind(on_press=make_handler(opener))
+            menu_grid.add_widget(button)
+
+        close.bind(on_press=popup.dismiss)
+
         popup.open()
 
-    def show_scientific(self, instance=None):
+    # ------------------------------------------------------------------
+    # Scientific popup (Phase 2)
+    # ------------------------------------------------------------------
+
+    def show_scientific(self):
         layout = BoxLayout(
             orientation="vertical",
             spacing=dp(10),
@@ -631,19 +1271,27 @@ class Calculator(BoxLayout):
 
         buttons = [
             "sin", "cos", "tan",
-            "log", "ln", "√",
-            "^", "!", "%",
-            "π", "e", "()",
+            "asin", "acos", "atan",
+            "x²", "x³", "√",
+            "xʸ", "1/x", "n!",
+            "π", "e", "DEG",
         ]
+
+        self.mode_button = None
 
         for text in buttons:
             button = Button(
                 text=text,
-                font_size="18sp",
+                font_size="16sp",
                 background_normal="",
                 background_color=self.button_color(text),
             )
-            button.bind(on_press=lambda btn: self.insert_scientific(btn.text))
+
+            if text == "DEG":
+                button.text = self.engine.angle_mode.upper()
+                self.mode_button = button
+
+            button.bind(on_press=self.scientific_button_pressed)
             grid.add_widget(button)
 
         layout.add_widget(grid)
@@ -655,16 +1303,73 @@ class Calculator(BoxLayout):
         )
         layout.add_widget(close_button)
 
-        popup = Popup(
-            title="Scientific",
-            content=layout,
-            size_hint=(0.9, 0.7),
-        )
+        popup = self.make_sheet_popup("Scientific", layout, height=0.6)
 
         close_button.bind(on_press=popup.dismiss)
         popup.open()
 
-    def show_memory(self, instance=None):
+    def scientific_button_pressed(self, button):
+        text = button.text
+
+        if text in ("DEG", "RAD"):
+            self.toggle_angle_mode(button)
+            return
+
+        function_tokens = {
+            "sin": "sin(",
+            "cos": "cos(",
+            "tan": "tan(",
+            "asin": "asin(",
+            "acos": "acos(",
+            "atan": "atan(",
+            "√": "sqrt(",
+        }
+
+        if text in function_tokens:
+            self.reset_if_calculated()
+            self.expression += function_tokens[text]
+            self.update_display()
+            return
+
+        if text in ("π", "e"):
+            self.reset_if_calculated()
+            self.expression += text
+            self.update_display()
+            return
+
+        if text == "xʸ":
+            self.append_operator("^")
+            return
+
+        if text == "x²":
+            self.append_power("2")
+            return
+
+        if text == "x³":
+            self.append_power("3")
+            return
+
+        if text == "1/x":
+            self.wrap_whole("1/(")
+            return
+
+        if text == "n!":
+            self.wrap_whole("fact(")
+            return
+
+    def toggle_angle_mode(self, button):
+        if self.engine.angle_mode == "deg":
+            self.engine.angle_mode = "rad"
+        else:
+            self.engine.angle_mode = "deg"
+
+        button.text = self.engine.angle_mode.upper()
+
+    # ------------------------------------------------------------------
+    # Memory popup
+    # ------------------------------------------------------------------
+
+    def show_memory(self):
         layout = BoxLayout(
             orientation="vertical",
             spacing=dp(10),
@@ -689,15 +1394,13 @@ class Calculator(BoxLayout):
             height=dp(45),
         )
 
-        for widget in (mc, mr, mp, mm):
-            layout.add_widget(widget)
+        layout.add_widget(mc)
+        layout.add_widget(mr)
+        layout.add_widget(mp)
+        layout.add_widget(mm)
         layout.add_widget(close)
 
-        popup = Popup(
-            title="Memory",
-            content=layout,
-            size_hint=(0.7, 0.6),
-        )
+        popup = self.make_sheet_popup("Memory", layout, height=0.42)
 
         mc.bind(on_press=lambda x: self.memory_clear())
         mr.bind(on_press=lambda x: self.memory_recall())
@@ -707,76 +1410,91 @@ class Calculator(BoxLayout):
 
         popup.open()
 
-    def show_more_menu(self, instance=None):
-        layout = BoxLayout(
-            orientation="vertical",
-            spacing=dp(10),
-            padding=dp(10),
-        )
+    def update_memory_label(self):
+        if self.memory_label is not None:
+            self.memory_label.text = f"Stored Memory: {self.format_number(self.memory)}"
 
-        scientific = Button(text="🧮 Scientific")
-        memory = Button(text="💾 Memory")
-        algebra = Button(text="Algebra")
-        history = Button(text="📜 History")
-        close = Button(
-            text="Close",
-            size_hint_y=None,
-            height=dp(45),
-        )
+    def update_memory_indicator(self):
+        self.memory_indicator.text = "M" if self.memory != 0 else ""
 
-        layout.add_widget(scientific)
-        layout.add_widget(memory)
-        layout.add_widget(algebra)
-        layout.add_widget(history)
-        layout.add_widget(close)
+    def memory_clear(self):
+        self.memory = 0
+        self.update_memory_label()
+        self.update_memory_indicator()
+        self.save_state()
 
-        popup = Popup(
-            title="More",
-            content=layout,
-            size_hint=(0.8, 0.65),
-        )
+    def memory_recall(self):
+        self.reset_if_calculated()
+        self.expression += self.format_number(self.memory)
+        self.update_display()
 
-        scientific.bind(on_press=lambda x: self.open_child_popup(self.show_scientific, popup))
-        memory.bind(on_press=lambda x: self.open_child_popup(self.show_memory, popup))
-        algebra.bind(on_press=lambda x: self.open_child_popup(self.show_algebra, popup))
-        history.bind(on_press=lambda x: self.open_child_popup(self.show_history, popup))
-        close.bind(on_press=popup.dismiss)
+    def memory_add(self):
+        try:
+            self.memory += float(self.display.text)
+        except (ValueError, TypeError):
+            pass
+        self.update_memory_label()
+        self.update_memory_indicator()
+        self.save_state()
 
-        popup.open()
+    def memory_subtract(self):
+        try:
+            self.memory -= float(self.display.text)
+        except (ValueError, TypeError):
+            pass
+        self.update_memory_label()
+        self.update_memory_indicator()
+        self.save_state()
 
-    def open_child_popup(self, method, parent_popup):
-        parent_popup.dismiss()
-        method()
+    # ------------------------------------------------------------------
+    # History popup (scrollable, tap to reuse, clearable)
+    # ------------------------------------------------------------------
 
-    def show_history(self, instance=None):
-        history_text = "\n".join(
-            f"{expression} = {answer}"
-            for expression, answer in self.history
-        )
-
-        if not history_text:
-            history_text = "No history yet."
-
-        history_box = TextInput(
-            text=history_text,
-            readonly=True,
-            multiline=True,
-        )
-
-        scroll = ScrollView()
-        scroll.add_widget(history_box)
-
+    def show_history(self):
         popup_layout = BoxLayout(
             orientation="vertical",
             spacing=dp(5),
         )
+
+        scroll = ScrollView()
+        history_grid = GridLayout(
+            cols=1,
+            spacing=dp(4),
+            size_hint_y=None,
+        )
+        history_grid.bind(minimum_height=history_grid.setter("height"))
+
+        def rebuild_history_grid():
+            history_grid.clear_widgets()
+
+            if not self.history:
+                history_grid.add_widget(
+                    Label(text="No history yet.", size_hint_y=None, height=dp(40))
+                )
+                return
+
+            for expr, ans in reversed(self.history):
+                entry_text = f"{expr} = {self.format_number(ans)}"
+                entry_button = Button(
+                    text=entry_text,
+                    size_hint_y=None,
+                    height=dp(45),
+                    halign="left",
+                )
+
+                def reuse(instance, answer=ans):
+                    self.reset_if_calculated()
+                    self.expression += self.format_number(answer)
+                    self.update_display()
+
+                entry_button.bind(on_press=reuse)
+                history_grid.add_widget(entry_button)
+
+        rebuild_history_grid()
+
+        scroll.add_widget(history_grid)
         popup_layout.add_widget(scroll)
 
-        copy_button = Button(
-            text="Copy History",
-            size_hint_y=None,
-            height=dp(45),
-        )
         clear_button = Button(
             text="Clear History",
             size_hint_y=None,
@@ -788,298 +1506,663 @@ class Calculator(BoxLayout):
             height=dp(45),
         )
 
-        popup_layout.add_widget(copy_button)
         popup_layout.add_widget(clear_button)
         popup_layout.add_widget(close_button)
 
-        popup = Popup(
-            title="Calculation History",
-            content=popup_layout,
-            size_hint=(0.9, 0.8),
-        )
+        popup = self.make_sheet_popup("Calculation History", popup_layout, height=0.6)
 
-        def clear_history(_):
+        def clear_history(instance):
             self.history = []
             self.history_label.text = "Welcome.\n\nLet's calculate something."
-            history_box.text = "No history yet."
+            rebuild_history_grid()
+            self.save_state()
 
-        def copy_history(_):
-            if self.history:
-                Clipboard.copy(history_box.text)
-
-        copy_button.bind(on_press=copy_history)
         clear_button.bind(on_press=clear_history)
         close_button.bind(on_press=popup.dismiss)
 
         popup.open()
 
-    def show_algebra(self, instance=None):
+    # ------------------------------------------------------------------
+    # About popup
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Shared popup-building helpers
+    # ------------------------------------------------------------------
+
+    def _labeled_input(self, layout, hint_text):
+        label = Label(
+            text=hint_text,
+            size_hint_y=None,
+            height=dp(24),
+            font_size="12sp",
+            halign="left",
+            valign="middle",
+        )
+        label.bind(size=self.update_text_size)
+        layout.add_widget(label)
+
+        field = TextInput(
+            multiline=False,
+            size_hint_y=None,
+            height=dp(40),
+        )
+        layout.add_widget(field)
+        return field
+
+    def _result_label(self, layout, height=dp(60)):
+        result = Label(
+            text="",
+            size_hint_y=None,
+            height=height,
+            font_size="14sp",
+            halign="left",
+            valign="middle",
+        )
+        result.bind(size=self.update_text_size)
+        layout.add_widget(result)
+        return result
+
+    def _action_row(self, layout, specs):
+        """specs: list of (label, callback) tuples, rendered as a row of buttons."""
+        row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(45),
+            spacing=dp(5),
+        )
+        for label, callback in specs:
+            button = Button(text=label)
+            button.bind(on_press=callback)
+            row.add_widget(button)
+        layout.add_widget(row)
+
+    # ------------------------------------------------------------------
+    # Number Theory popup (Phase 3)
+    # ------------------------------------------------------------------
+
+    def show_number_theory(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="Prime check & factorization",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        n_field = self._labeled_input(layout, "Whole number")
+        n_result = self._result_label(layout)
+
+        def check_prime(instance):
+            try:
+                n = int(float(n_field.text))
+                verdict = "prime" if is_prime(n) else "not prime"
+                n_result.text = f"{n} is {verdict}"
+            except Exception as exc:
+                n_result.text = f"Error: {exc}"
+
+        def factorize(instance):
+            try:
+                n = int(float(n_field.text))
+                factors = prime_factorize(n)
+                n_result.text = format_prime_factors(factors)
+            except Exception as exc:
+                n_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("Is Prime?", check_prime),
+            ("Prime Factors", factorize),
+        ])
+
+        layout.add_widget(Label(
+            text="GCD & LCM",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        a_field = self._labeled_input(layout, "First whole number")
+        b_field = self._labeled_input(layout, "Second whole number")
+        ab_result = self._result_label(layout, height=dp(40))
+
+        def compute_gcd(instance):
+            try:
+                a, b = int(float(a_field.text)), int(float(b_field.text))
+                ab_result.text = f"GCD = {gcd_of(a, b)}"
+            except Exception as exc:
+                ab_result.text = f"Error: {exc}"
+
+        def compute_lcm(instance):
+            try:
+                a, b = int(float(a_field.text)), int(float(b_field.text))
+                ab_result.text = f"LCM = {lcm_of(a, b)}"
+            except Exception as exc:
+                ab_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("GCD", compute_gcd),
+            ("LCM", compute_lcm),
+        ])
+
+        layout.add_widget(Label(
+            text="Simplify a fraction",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        num_field = self._labeled_input(layout, "Numerator")
+        den_field = self._labeled_input(layout, "Denominator")
+        frac_result = self._result_label(layout, height=dp(40))
+
+        def simplify(instance):
+            try:
+                num, den = int(float(num_field.text)), int(float(den_field.text))
+                n, d = simplify_fraction(num, den)
+                frac_result.text = f"= {n}/{d}"
+            except Exception as exc:
+                frac_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [("Simplify", simplify)])
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Number Theory", scroll, height=0.75)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Algebra popup (Phase 3)
+    # ------------------------------------------------------------------
+
+    def show_algebra(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="Equation in x, e.g. 2*x+3=7  or  x^2-5*x+6=0",
+            size_hint_y=None, height=dp(36), font_size="12sp",
+        ))
+        eq_field = self._labeled_input(layout, "Equation")
+        eq_result = self._result_label(layout, height=dp(50))
+
+        def do_linear(instance):
+            try:
+                x = solve_linear(self.engine, eq_field.text)
+                eq_result.text = f"x = {format_plain_number(x)}"
+            except Exception as exc:
+                eq_result.text = f"Error: {exc}"
+
+        def do_quadratic(instance):
+            try:
+                roots = solve_quadratic(self.engine, eq_field.text)
+                eq_result.text = "x = " + ", ".join(format_plain_number(r) for r in roots)
+            except Exception as exc:
+                eq_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("Solve Linear", do_linear),
+            ("Solve Quadratic", do_quadratic),
+        ])
+
+        layout.add_widget(Label(
+            text="Simultaneous equations in x and y",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        eq1_field = self._labeled_input(layout, "Equation 1, e.g. 2*x+y=5")
+        eq2_field = self._labeled_input(layout, "Equation 2, e.g. x-y=1")
+        sim_result = self._result_label(layout, height=dp(40))
+
+        def do_simultaneous(instance):
+            try:
+                x, y = solve_simultaneous(self.engine, eq1_field.text, eq2_field.text)
+                sim_result.text = f"x = {format_plain_number(x)}, y = {format_plain_number(y)}"
+            except Exception as exc:
+                sim_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [("Solve Simultaneous", do_simultaneous)])
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Algebra", scroll, height=0.75)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Calculus popup (Phase 4) - numerical methods, radians internally
+    # ------------------------------------------------------------------
+
+    def show_calculus(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="f(x) = , e.g. x^2, sin(x), 1/x",
+            size_hint_y=None, height=dp(24), font_size="12sp",
+        ))
+        expr_field = self._labeled_input(layout, "f(x)")
+        point_field = self._labeled_input(layout, "x =")
+        calc_result = self._result_label(layout, height=dp(60))
+
+        def with_radians(func):
+            previous_mode = self.engine.angle_mode
+            self.engine.angle_mode = "rad"
+            try:
+                return func()
+            finally:
+                self.engine.angle_mode = previous_mode
+
+        def do_derivative(instance):
+            try:
+                x0 = float(point_field.text)
+                value = with_radians(
+                    lambda: numerical_derivative(self.engine, expr_field.text, x0)
+                )
+                calc_result.text = f"f'({format_plain_number(x0)}) \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+
+        def do_second_derivative(instance):
+            try:
+                x0 = float(point_field.text)
+                value = with_radians(
+                    lambda: numerical_second_derivative(self.engine, expr_field.text, x0)
+                )
+                calc_result.text = f"f''({format_plain_number(x0)}) \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+
+        def do_limit(instance):
+            try:
+                x0 = float(point_field.text)
+                value = with_radians(
+                    lambda: numerical_limit(self.engine, expr_field.text, x0)
+                )
+                calc_result.text = f"limit at x={format_plain_number(x0)} \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("f'(x)", do_derivative),
+            ("f''(x)", do_second_derivative),
+            ("limit", do_limit),
+        ])
+
+        layout.add_widget(Label(
+            text="Definite integral, from a to b",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        a_field = self._labeled_input(layout, "a =")
+        b_field = self._labeled_input(layout, "b =")
+        integral_result = self._result_label(layout, height=dp(40))
+
+        def do_integral(instance):
+            try:
+                a, b = float(a_field.text), float(b_field.text)
+                value = with_radians(
+                    lambda: numerical_integral(self.engine, expr_field.text, a, b)
+                )
+                integral_result.text = f"\u222b f(x) dx \u2248 {format_plain_number(value)}"
+            except Exception as exc:
+                integral_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [("Integrate", do_integral)])
+
+        note = Label(
+            text=(
+                "Note: results are close numerical approximations, "
+                "not exact symbolic answers. Trig functions here always "
+                "use radians, regardless of the Scientific DEG/RAD setting."
+            ),
+            size_hint_y=None, height=dp(50), font_size="11sp",
+        )
+        note.bind(size=self.update_text_size)
+        layout.add_widget(note)
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Calculus", scroll, height=0.8)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Matrices & Vectors popup (Phase 5)
+    # ------------------------------------------------------------------
+
+    def show_matrices_vectors(self):
+        scroll = ScrollView()
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+
+        layout.add_widget(Label(
+            text="Matrices - rows separated by ; , values by ,  e.g. 1,2;3,4",
+            size_hint_y=None, height=dp(36), font_size="12sp",
+        ))
+        matrix_a_field = self._labeled_input(layout, "Matrix A")
+        matrix_b_field = self._labeled_input(layout, "Matrix B (for +, -, x)")
+        matrix_result = self._result_label(layout, height=dp(90))
+
+        def matrix_op(op):
+            def handler(instance):
+                try:
+                    a = parse_matrix(matrix_a_field.text)
+                    if op in ("add", "sub", "mul"):
+                        b = parse_matrix(matrix_b_field.text)
+                        if op == "add":
+                            result = matrix_add(a, b)
+                        elif op == "sub":
+                            result = matrix_add(a, b, sign=-1)
+                        else:
+                            result = matrix_multiply(a, b)
+                        matrix_result.text = format_matrix(result)
+                    elif op == "det":
+                        matrix_result.text = f"det(A) = {format_plain_number(matrix_determinant(a))}"
+                    elif op == "inv":
+                        matrix_result.text = format_matrix(matrix_inverse(a))
+                    elif op == "transpose":
+                        matrix_result.text = format_matrix(matrix_transpose(a))
+                    elif op == "rank":
+                        matrix_result.text = f"rank(A) = {matrix_rank(a)}"
+                except Exception as exc:
+                    matrix_result.text = f"Error: {exc}"
+            return handler
+
+        self._action_row(layout, [
+            ("A+B", matrix_op("add")),
+            ("A-B", matrix_op("sub")),
+            ("A\u00d7B", matrix_op("mul")),
+        ])
+        self._action_row(layout, [
+            ("det(A)", matrix_op("det")),
+            ("inverse(A)", matrix_op("inv")),
+        ])
+        self._action_row(layout, [
+            ("transpose(A)", matrix_op("transpose")),
+            ("rank(A)", matrix_op("rank")),
+        ])
+
+        layout.add_widget(Label(
+            text="Vectors - comma separated, e.g. 1,2,3",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        vec_a_field = self._labeled_input(layout, "Vector A")
+        vec_b_field = self._labeled_input(layout, "Vector B (for +, dot, cross)")
+        vector_result = self._result_label(layout, height=dp(50))
+
+        def vector_op(op):
+            def handler(instance):
+                try:
+                    a = parse_vector(vec_a_field.text)
+                    if op in ("add", "dot", "cross"):
+                        b = parse_vector(vec_b_field.text)
+                        if op == "add":
+                            vector_result.text = format_vector(vector_add(a, b))
+                        elif op == "dot":
+                            vector_result.text = f"A\u00b7B = {format_plain_number(vector_dot(a, b))}"
+                        else:
+                            vector_result.text = format_vector(vector_cross(a, b))
+                    elif op == "magnitude":
+                        vector_result.text = f"|A| = {format_plain_number(vector_magnitude(a))}"
+                    elif op == "unit":
+                        vector_result.text = format_vector(vector_unit(a))
+                except Exception as exc:
+                    vector_result.text = f"Error: {exc}"
+            return handler
+
+        self._action_row(layout, [
+            ("A+B", vector_op("add")),
+            ("A\u00b7B dot", vector_op("dot")),
+        ])
+        self._action_row(layout, [
+            ("A\u00d7B cross", vector_op("cross")),
+            ("|A|", vector_op("magnitude")),
+            ("unit(A)", vector_op("unit")),
+        ])
+
+        scroll.add_widget(layout)
+        popup = self.make_sheet_popup("Matrices & Vectors", scroll, height=0.85)
+        popup.open()
+
+    # ------------------------------------------------------------------
+    # Conversions popup (Phase 7)
+    # ------------------------------------------------------------------
+
+    def show_conversions(self):
+        outer = BoxLayout(
+            orientation="vertical",
+            spacing=dp(6),
+            padding=dp(10),
+        )
+
+        category_grid = GridLayout(
+            cols=4,
+            size_hint_y=None,
+            height=dp(90),
+            spacing=dp(4),
+        )
+        for category in CONVERSION_CATEGORIES:
+            button = Button(text=category, font_size="12sp")
+            button.bind(on_press=lambda inst, c=category: select_category(c))
+            category_grid.add_widget(button)
+        outer.add_widget(category_grid)
+
+        units_area = BoxLayout(orientation="vertical", spacing=dp(6))
+        outer.add_widget(units_area)
+
+        state = {"category": None, "from_unit": None, "to_unit": None}
+
+        def select_category(category):
+            state["category"] = category
+            state["from_unit"] = None
+            state["to_unit"] = None
+            rebuild_units_area()
+
+        def rebuild_units_area():
+            units_area.clear_widgets()
+            category = state["category"]
+            if category is None:
+                units_area.add_widget(Label(text="Pick a category above"))
+                return
+
+            unit_names = (
+                TEMPERATURE_UNITS if category == "Temperature"
+                else list(CONVERSION_CATEGORIES[category].keys())
+            )
+            state["from_unit"] = unit_names[0]
+            state["to_unit"] = unit_names[1] if len(unit_names) > 1 else unit_names[0]
+
+            units_area.add_widget(Label(
+                text=f"{category}: from",
+                size_hint_y=None, height=dp(22), font_size="12sp",
+            ))
+            from_grid = GridLayout(
+                cols=4, size_hint_y=None, height=dp(40 * ((len(unit_names) + 3) // 4)),
+                spacing=dp(3),
+            )
+            from_buttons = {}
+
+            def pick_from(unit):
+                state["from_unit"] = unit
+                for name, btn in from_buttons.items():
+                    btn.background_color = (0.1, 0.55, 0.9, 1) if name == unit else (0.15, 0.15, 0.18, 1)
+
+            for unit in unit_names:
+                b = Button(
+                    text=unit, font_size="12sp",
+                    background_normal="",
+                    background_color=(0.1, 0.55, 0.9, 1) if unit == state["from_unit"] else (0.15, 0.15, 0.18, 1),
+                )
+                b.bind(on_press=lambda inst, u=unit: pick_from(u))
+                from_buttons[unit] = b
+                from_grid.add_widget(b)
+            units_area.add_widget(from_grid)
+
+            units_area.add_widget(Label(
+                text="to",
+                size_hint_y=None, height=dp(22), font_size="12sp",
+            ))
+            to_grid = GridLayout(
+                cols=4, size_hint_y=None, height=dp(40 * ((len(unit_names) + 3) // 4)),
+                spacing=dp(3),
+            )
+            to_buttons = {}
+
+            def pick_to(unit):
+                state["to_unit"] = unit
+                for name, btn in to_buttons.items():
+                    btn.background_color = (0.1, 0.55, 0.9, 1) if name == unit else (0.15, 0.15, 0.18, 1)
+
+            for unit in unit_names:
+                b = Button(
+                    text=unit, font_size="12sp",
+                    background_normal="",
+                    background_color=(0.1, 0.55, 0.9, 1) if unit == state["to_unit"] else (0.15, 0.15, 0.18, 1),
+                )
+                b.bind(on_press=lambda inst, u=unit: pick_to(u))
+                to_buttons[unit] = b
+                to_grid.add_widget(b)
+            units_area.add_widget(to_grid)
+
+            value_field = TextInput(
+                multiline=False, size_hint_y=None, height=dp(40),
+                hint_text="Value to convert",
+            )
+            units_area.add_widget(value_field)
+
+            result_label = Label(text="", size_hint_y=None, height=dp(40))
+            result_label.bind(size=self.update_text_size)
+
+            def do_convert(instance):
+                try:
+                    value = float(value_field.text)
+                    converted = convert_units(category, value, state["from_unit"], state["to_unit"])
+                    result_label.text = (
+                        f"{format_plain_number(value)} {state['from_unit']} = "
+                        f"{format_plain_number(converted)} {state['to_unit']}"
+                    )
+                except Exception as exc:
+                    result_label.text = f"Error: {exc}"
+
+            convert_button = Button(text="Convert", size_hint_y=None, height=dp(40))
+            convert_button.bind(on_press=do_convert)
+            units_area.add_widget(convert_button)
+            units_area.add_widget(result_label)
+
+        rebuild_units_area()
+
+        popup = self.make_sheet_popup("Conversions", outer, height=0.85)
+        popup.open()
+
+        return popup, state, select_category
+
+    # ------------------------------------------------------------------
+    # Graphing popup (Phase 6 - basic function plotting)
+    # ------------------------------------------------------------------
+
+    def show_graph(self):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            padding=dp(10),
+        )
+
+        controls = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            spacing=dp(5),
+        )
+        expr_field = TextInput(
+            multiline=False,
+            hint_text="f(x) = e.g. sin(x)",
+        )
+        x_min_field = TextInput(multiline=False, text="-10", size_hint_x=0.3)
+        x_max_field = TextInput(multiline=False, text="10", size_hint_x=0.3)
+        controls.add_widget(expr_field)
+        controls.add_widget(x_min_field)
+        controls.add_widget(x_max_field)
+        layout.add_widget(controls)
+
+        plot_area = BoxLayout(size_hint_y=1)
+        layout.add_widget(plot_area)
+
+        error_label = Label(text="", size_hint_y=None, height=dp(30))
+        error_label.bind(size=self.update_text_size)
+        layout.add_widget(error_label)
+
+        def plot(instance):
+            plot_area.clear_widgets()
+            error_label.text = ""
+            try:
+                x_min = float(x_min_field.text)
+                x_max = float(x_max_field.text)
+                if x_min >= x_max:
+                    raise ValueError("x min must be less than x max")
+
+                previous_mode = self.engine.angle_mode
+                self.engine.angle_mode = "rad"
+                try:
+                    graph = GraphCanvas(self.engine, expr_field.text, x_min=x_min, x_max=x_max)
+                finally:
+                    self.engine.angle_mode = previous_mode
+
+                plot_area.add_widget(graph)
+                if graph.error:
+                    error_label.text = graph.error
+            except Exception as exc:
+                error_label.text = f"Error: {exc}"
+
+        plot_button = Button(text="Plot", size_hint_y=None, height=dp(40))
+        plot_button.bind(on_press=plot)
+        layout.add_widget(plot_button)
+
+        popup = self.make_sheet_popup("Graph", layout, height=0.85)
+        popup.open()
+
+        return popup, plot
+
+    def show_about(self, instance):
         layout = BoxLayout(
             orientation="vertical",
             spacing=dp(10),
             padding=dp(10),
         )
 
-        scroll = ScrollView()
-        form = BoxLayout(
-            orientation="vertical",
-            spacing=dp(10),
-            size_hint_y=None,
-            padding=dp(5),
-        )
-        form.bind(minimum_height=form.setter("height"))
-
-        title = Label(
-            text="Algebra",
-            font_size="20sp",
-            size_hint_y=None,
-            height=dp(45),
-            halign="left",
-            valign="middle",
-        )
-        title.bind(size=self.update_text_size)
-        form.add_widget(title)
-
-        hint = Label(
-            text="Equation in x, e.g. 2*x+3=7 or x^2-5*x+6=0",
-            size_hint_y=None,
-            height=dp(55),
+        about_label = Label(
+            text=(
+                "MATHEMATICAL CALCULATOR\n\n"
+                f"Version {APP_VERSION}\n\n"
+                "Created by Quareeb\n\n"
+                "Thank you for using this calculator!"
+            ),
             halign="center",
             valign="middle",
         )
-        hint.bind(size=self.update_text_size)
-        form.add_widget(hint)
+        about_label.bind(size=self.update_text_size)
 
-        equation_label = Label(
-            text="Equation",
-            size_hint_y=None,
-            height=dp(30),
-            halign="left",
-        )
-        form.add_widget(equation_label)
-
-        equation = TextInput(
-            text="",
-            multiline=False,
-            size_hint_y=None,
-            height=dp(50),
-        )
-        form.add_widget(equation)
-
-        result = Label(
-            text="",
-            size_hint_y=None,
-            height=dp(70),
-            halign="left",
-            valign="middle",
-        )
-        result.bind(size=self.update_text_size)
-        form.add_widget(result)
-
-        linear_button = Button(
-            text="Solve Linear",
-            size_hint_y=None,
-            height=dp(50),
-        )
-        quadratic_button = Button(
-            text="Solve Quadratic",
-            size_hint_y=None,
-            height=dp(50),
-        )
-        form.add_widget(linear_button)
-        form.add_widget(quadratic_button)
-
-        sub_title = Label(
-            text="Simultaneous equations in x and y",
-            font_size="18sp",
-            bold=True,
-            size_hint_y=None,
-            height=dp(45),
-            halign="center",
-            valign="middle",
-        )
-        sub_title.bind(size=self.update_text_size)
-        form.add_widget(sub_title)
-
-        eq1_label = Label(
-            text="Equation 1, e.g. 2*x+y=5",
-            size_hint_y=None,
-            height=dp(35),
-            halign="left",
-        )
-        form.add_widget(eq1_label)
-
-        eq1 = TextInput(
-            text="",
-            multiline=False,
-            size_hint_y=None,
-            height=dp(50),
-        )
-        form.add_widget(eq1)
-
-        eq2_label = Label(
-            text="Equation 2, e.g. x-y=1",
-            size_hint_y=None,
-            height=dp(35),
-            halign="left",
-        )
-        form.add_widget(eq2_label)
-
-        eq2 = TextInput(
-            text="",
-            multiline=False,
-            size_hint_y=None,
-            height=dp(50),
-        )
-        form.add_widget(eq2)
-
-        simultaneous_result = Label(
-            text="",
-            size_hint_y=None,
-            height=dp(70),
-            halign="left",
-            valign="middle",
-        )
-        simultaneous_result.bind(size=self.update_text_size)
-        form.add_widget(simultaneous_result)
-
-        simultaneous_button = Button(
-            text="Solve Simultaneous",
-            size_hint_y=None,
-            height=dp(50),
-        )
-        form.add_widget(simultaneous_button)
-
-        scroll.add_widget(form)
-        layout.add_widget(scroll)
-
-        close = Button(
+        close_button = Button(
             text="Close",
             size_hint_y=None,
             height=dp(45),
         )
-        layout.add_widget(close)
 
-        popup = Popup(
-            title="Algebra",
-            content=layout,
-            size_hint=(0.98, 0.96),
-        )
+        layout.add_widget(about_label)
+        layout.add_widget(close_button)
 
-        def solve_linear(_):
-            try:
-                result.text = self.algebra.solve_linear(equation.text)
-            except ZeroDivisionError:
-                result.text = "Cannot divide by zero"
-            except Exception as exc:
-                result.text = f"Error: {exc}"
+        popup = self.make_sheet_popup("About", layout, height=0.35)
 
-        def solve_quadratic(_):
-            try:
-                result.text = self.algebra.solve_quadratic(equation.text)
-            except ZeroDivisionError:
-                result.text = "Cannot divide by zero"
-            except Exception as exc:
-                result.text = f"Error: {exc}"
-
-        def solve_simultaneous(_):
-            try:
-                simultaneous_result.text = self.simultaneous.solve(
-                    eq1.text,
-                    eq2.text,
-                )
-            except ZeroDivisionError:
-                simultaneous_result.text = "Cannot divide by zero"
-            except Exception as exc:
-                simultaneous_result.text = f"Error: {exc}"
-
-        linear_button.bind(on_press=solve_linear)
-        quadratic_button.bind(on_press=solve_quadratic)
-        simultaneous_button.bind(on_press=solve_simultaneous)
-        close.bind(on_press=popup.dismiss)
-
+        close_button.bind(on_press=popup.dismiss)
         popup.open()
-
-    def update_display(self):
-        self.display.text = self.expression or "0"
-
-    def update_memory_label(self):
-        if hasattr(self, "memory_label"):
-            self.memory_label.text = (
-                f"Stored Memory: {self.format_number(self.memory)}"
-            )
-
-    def update_memory_indicator(self):
-        self.memory_indicator.text = "M" if self.memory != 0 else ""
-
-    def memory_clear(self):
-        self.memory = 0
-        self.update_memory_label()
-        self.update_memory_indicator()
-
-    def memory_recall(self):
-        self.expression += self.format_number(self.memory)
-        self.just_calculated = False
-        self.update_display()
-
-    def memory_add(self):
-        try:
-            value = self.engine.evaluate(self.expression or "0")
-            self.memory += value
-            self.update_memory_label()
-        except Exception:
-            pass
-        self.update_memory_indicator()
-
-    def memory_subtract(self):
-        try:
-            value = self.engine.evaluate(self.expression or "0")
-            self.memory -= value
-            self.update_memory_label()
-        except Exception:
-            pass
-        self.update_memory_indicator()
-
-    @staticmethod
-    def format_number(number):
-        if isinstance(number, float) and number.is_integer():
-            return str(int(number))
-        return str(number)
-
-    def calculate(self):
-        if not self.expression:
-            return
-
-        try:
-            original = self.expression
-            result = self.engine.evaluate(self.expression)
-
-            if isinstance(result, float) and result.is_integer():
-                result = int(result)
-            elif isinstance(result, float):
-                result = round(result, 10)
-
-            answer = self.format_number(result)
-
-            self.history.append((original, answer))
-            self.history = self.history[-50:]
-
-            self.expression = answer
-            self.display.text = answer
-            self.just_calculated = True
-
-            self.history_label.text = "\n".join(
-                f"{expression} = {answer}"
-                for expression, answer in self.history[-5:]
-            )
-
-        except ZeroDivisionError:
-            self.display.text = "Cannot divide by zero"
-            self.just_calculated = False
-
-        except (ValueError, TypeError, SyntaxError, OverflowError):
-            self.display.text = "Math Error"
-            self.just_calculated = False
 
 
 class MathematicalCalculatorApp(App):
