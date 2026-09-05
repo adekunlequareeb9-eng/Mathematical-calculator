@@ -6,6 +6,18 @@ import os
 import re
 from fractions import Fraction
 
+try:
+    import sympy
+    from sympy.parsing.sympy_parser import (
+        parse_expr,
+        standard_transformations,
+        implicit_multiplication_application,
+    )
+    _SYMPY_TRANSFORMATIONS = standard_transformations + (implicit_multiplication_application,)
+    SYMPY_AVAILABLE = True
+except Exception:
+    SYMPY_AVAILABLE = False
+
 from kivy.app import App
 from kivy.core.window import Window
 from kivy.metrics import dp
@@ -106,7 +118,7 @@ class MathEngine:
             raise ValueError("Number too large for factorial")
         return math.factorial(int(x))
 
-    def evaluate(self, expression, variables=None):
+    def evaluate(self, expression, variables=None, trace=None):
         self._variables = variables or {}
 
         expression = expression.strip()
@@ -120,7 +132,7 @@ class MathEngine:
             raise ValueError("Empty expression")
 
         tree = ast.parse(expression, mode="eval")
-        return self._solve(tree.body)
+        return self._solve(tree.body, trace)
 
     @staticmethod
     def _insert_implicit_multiplication(expression):
@@ -138,7 +150,12 @@ class MathEngine:
         expression = re.sub(r"(?<![a-zA-Z])([xy])\(", r"\1*(", expression)
         return expression
 
-    def _solve(self, node):
+    _OP_SYMBOLS = {
+        ast.Add: "+", ast.Sub: "-", ast.Mult: "\u00d7",
+        ast.Div: "\u00f7", ast.Pow: "^", ast.Mod: "%",
+    }
+
+    def _solve(self, node, trace=None):
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (int, float)):
                 return node.value
@@ -149,8 +166,8 @@ class MathEngine:
             if operation is None:
                 raise ValueError("Unsupported operation")
 
-            left = self._solve(node.left)
-            right = self._solve(node.right)
+            left = self._solve(node.left, trace)
+            right = self._solve(node.right, trace)
 
             if isinstance(node.op, (ast.Div, ast.Mod)) and right == 0:
                 raise ZeroDivisionError("Cannot divide by zero")
@@ -158,13 +175,26 @@ class MathEngine:
             if isinstance(node.op, ast.Pow) and abs(right) > 1000:
                 raise ValueError("Power too large")
 
-            return operation(left, right)
+            result = operation(left, right)
+
+            if trace is not None:
+                symbol = self._OP_SYMBOLS.get(type(node.op), "?")
+                trace.append(
+                    f"{format_plain_number(left)} {symbol} "
+                    f"{format_plain_number(right)} = {format_plain_number(result)}"
+                )
+
+            return result
 
         if isinstance(node, ast.UnaryOp):
             operation = self.operators.get(type(node.op))
             if operation is None:
                 raise ValueError("Unsupported operation")
-            return operation(self._solve(node.operand))
+            operand = self._solve(node.operand, trace)
+            result = operation(operand)
+            if trace is not None and isinstance(node.op, ast.USub):
+                trace.append(f"negate {format_plain_number(operand)} = {format_plain_number(result)}")
+            return result
 
         if isinstance(node, ast.Name):
             if node.id in self.constants:
@@ -181,8 +211,14 @@ class MathEngine:
             if function is None:
                 raise ValueError("Unknown function")
 
-            arguments = [self._solve(arg) for arg in node.args]
-            return function(*arguments)
+            arguments = [self._solve(arg, trace) for arg in node.args]
+            result = function(*arguments)
+
+            if trace is not None:
+                args_str = ", ".join(format_plain_number(a) for a in arguments)
+                trace.append(f"{node.func.id}({args_str}) = {format_plain_number(result)}")
+
+            return result
 
         raise ValueError("Invalid expression")
 
@@ -252,6 +288,105 @@ def simplify_fraction(numerator, denominator):
     return frac.numerator, frac.denominator
 
 
+# --- Step-narrating versions for the "Steps" feature. Kept separate from
+# the plain versions above so existing call sites are untouched. ---
+
+def is_prime_steps(n):
+    n = int(n)
+    steps = []
+    if n < 2:
+        steps.append(f"{n} is less than 2, so it isn't prime")
+        return False, steps
+    if n in (2, 3):
+        steps.append(f"{n} is one of the smallest primes")
+        return True, steps
+    if n % 2 == 0:
+        steps.append(f"{n} is even, so it's divisible by 2 - not prime")
+        return False, steps
+
+    limit = math.isqrt(n)
+    steps.append(f"Only need to check odd divisors up to \u221a{n} \u2248 {limit}")
+    i = 3
+    shown = 0
+    while i * i <= n:
+        if n % i == 0:
+            steps.append(f"{n} \u00f7 {i} = {n // i} exactly - not prime")
+            return False, steps
+        if shown < 6:
+            steps.append(f"{n} \u00f7 {i} is not a whole number")
+            shown += 1
+        elif shown == 6:
+            steps.append("... continuing to check the remaining divisors")
+            shown += 1
+        i += 2
+    steps.append(f"No divisors found up to \u221a{n} - {n} is prime")
+    return True, steps
+
+
+def prime_factorize_steps(n):
+    n = int(n)
+    if n < 2:
+        raise ValueError("Enter a whole number greater than 1")
+
+    steps = []
+    original = n
+    factors = []
+    d = 2
+    while d * d <= n:
+        count = 0
+        while n % d == 0:
+            steps.append(f"{n} \u00f7 {d} = {n // d}")
+            n //= d
+            count += 1
+        if count:
+            factors.append((d, count))
+        d += 1
+    if n > 1:
+        factors.append((n, 1))
+        if n != original:
+            steps.append(f"{n} is prime - stop here")
+    return factors, steps
+
+
+def gcd_steps(a, b):
+    a, b = int(a), int(b)
+    steps = []
+    x, y = a, b
+    while y != 0:
+        q, r = divmod(x, y)
+        steps.append(f"{x} = {y} \u00d7 {q} + {r}")
+        x, y = y, r
+    steps.append(f"GCD({a}, {b}) = {x}")
+    return x, steps
+
+
+def lcm_steps(a, b):
+    a, b = int(a), int(b)
+    if a == 0 or b == 0:
+        return 0, ["One of the numbers is 0, so the LCM is 0"]
+    g, gcd_trace = gcd_steps(a, b)
+    result = abs(a * b) // g
+    steps = gcd_trace + [
+        f"LCM({a}, {b}) = |{a} \u00d7 {b}| \u00f7 GCD({a},{b}) "
+        f"= {abs(a * b)} \u00f7 {g} = {result}"
+    ]
+    return result, steps
+
+
+def simplify_fraction_steps(numerator, denominator):
+    if denominator == 0:
+        raise ZeroDivisionError("Cannot divide by zero")
+    numerator, denominator = int(numerator), int(denominator)
+    g = math.gcd(abs(numerator), abs(denominator))
+    frac = Fraction(numerator, denominator)
+    steps = [
+        f"GCD({numerator}, {denominator}) = {g}",
+        f"{numerator} \u00f7 {g} = {frac.numerator}",
+        f"{denominator} \u00f7 {g} = {frac.denominator}",
+    ]
+    return (frac.numerator, frac.denominator), steps
+
+
 # ----------------------------------------------------------------------
 # Algebra - equation solving via numerical coefficient extraction
 # (no symbolic engine needed: we sample the user's expression at a few
@@ -265,7 +400,7 @@ def _equation_sides(equation):
     return left.strip(), right.strip()
 
 
-def solve_linear(engine, equation):
+def solve_linear(engine, equation, steps=None):
     left, right = _equation_sides(equation)
 
     def f(x):
@@ -284,10 +419,19 @@ def solve_linear(engine, equation):
             raise ValueError("Infinitely many solutions (always true)")
         raise ValueError("No solution")
 
-    return -y0 / a
+    result = -y0 / a
+
+    if steps is not None:
+        steps.append(f"Rewrite as: ({left}) - ({right}) = 0")
+        steps.append(f"At x=0, this equals {format_plain_number(y0)}")
+        steps.append(f"At x=1, this equals {format_plain_number(y1)}")
+        steps.append(f"So the equation is: {format_plain_number(a)}\u00d7x + {format_plain_number(y0)} = 0")
+        steps.append(f"x = -({format_plain_number(y0)}) \u00f7 {format_plain_number(a)} = {format_plain_number(result)}")
+
+    return result
 
 
-def solve_quadratic(engine, equation):
+def solve_quadratic(engine, equation, steps=None):
     left, right = _equation_sides(equation)
 
     def f(x):
@@ -304,19 +448,49 @@ def solve_quadratic(engine, equation):
     if abs(coeff_a) < 1e-9:
         if abs(coeff_b) < 1e-12:
             raise ValueError("No unique solution")
-        return [-coeff_c / coeff_b]
+        result = [-coeff_c / coeff_b]
+        if steps is not None:
+            steps.append("The x\u00b2 coefficient is 0 - this is actually linear")
+            steps.append(f"x = {format_plain_number(result[0])}")
+        return result
 
     discriminant = coeff_b * coeff_b - 4 * coeff_a * coeff_c
+
+    if steps is not None:
+        steps.append(f"Rewrite as: ({left}) - ({right}) = 0")
+        steps.append(
+            f"Matching to a\u00d7x\u00b2+b\u00d7x+c: a={format_plain_number(coeff_a)}, "
+            f"b={format_plain_number(coeff_b)}, c={format_plain_number(coeff_c)}"
+        )
+        steps.append(
+            f"Discriminant = b\u00b2-4ac = {format_plain_number(coeff_b)}\u00b2 - "
+            f"4\u00d7{format_plain_number(coeff_a)}\u00d7{format_plain_number(coeff_c)} "
+            f"= {format_plain_number(discriminant)}"
+        )
+
     if discriminant < 0:
+        if steps is not None:
+            steps.append("Discriminant is negative - no real roots")
         raise ValueError("No real roots")
 
     sqrt_d = math.sqrt(discriminant)
     x1 = (-coeff_b + sqrt_d) / (2 * coeff_a)
     x2 = (-coeff_b - sqrt_d) / (2 * coeff_a)
-    return sorted({round(x1, 10), round(x2, 10)})
+    result = sorted({round(x1, 10), round(x2, 10)})
+
+    if steps is not None:
+        steps.append(f"\u221a discriminant = {format_plain_number(sqrt_d)}")
+        steps.append(
+            f"x = (-b \u00b1 \u221a discriminant) \u00f7 (2a) = "
+            f"({format_plain_number(-coeff_b)} \u00b1 {format_plain_number(sqrt_d)}) \u00f7 "
+            f"{format_plain_number(2 * coeff_a)}"
+        )
+        steps.append("x = " + ", ".join(format_plain_number(r) for r in result))
+
+    return result
 
 
-def solve_simultaneous(engine, equation1, equation2):
+def solve_simultaneous(engine, equation1, equation2, steps=None):
     def make_f(equation):
         left, right = _equation_sides(equation)
 
@@ -338,10 +512,26 @@ def solve_simultaneous(engine, equation1, equation2):
 
     det = a1 * b2 - a2 * b1
     if abs(det) < 1e-12:
+        if steps is not None:
+            steps.append("The two equations are parallel or identical - no unique solution")
         raise ValueError("No unique solution (equations are parallel or identical)")
 
     x = (c1 * b2 - c2 * b1) / det
     y = (a1 * c2 - a2 * c1) / det
+
+    if steps is not None:
+        steps.append(
+            f"Equation 1 as a\u00d7x+b\u00d7y=c: {format_plain_number(a1)}\u00d7x + "
+            f"{format_plain_number(b1)}\u00d7y = {format_plain_number(c1)}"
+        )
+        steps.append(
+            f"Equation 2 as a\u00d7x+b\u00d7y=c: {format_plain_number(a2)}\u00d7x + "
+            f"{format_plain_number(b2)}\u00d7y = {format_plain_number(c2)}"
+        )
+        steps.append(f"Determinant = a1\u00d7b2 - a2\u00d7b1 = {format_plain_number(det)}")
+        steps.append(f"x = (c1\u00d7b2 - c2\u00d7b1) \u00f7 determinant = {format_plain_number(x)}")
+        steps.append(f"y = (a1\u00d7c2 - a2\u00d7c1) \u00f7 determinant = {format_plain_number(y)}")
+
     return x, y
 
 
@@ -390,6 +580,119 @@ def numerical_limit(engine, expression, x0, h=1e-6):
         raise ValueError("Limit does not appear to converge from both sides")
 
     return (left + right) / 2
+
+
+# ----------------------------------------------------------------------
+# Symbolic algebra & calculus, via sympy - pure Python, no C extensions,
+# so no cross-compilation risk for the Android build. Kept fully separate
+# from the numerical methods above: if sympy is unavailable for any
+# reason, SYMPY_AVAILABLE is False and every function below raises a
+# clear, friendly error instead of crashing the app.
+# ----------------------------------------------------------------------
+
+def _require_sympy():
+    if not SYMPY_AVAILABLE:
+        raise ValueError("Symbolic math isn't available on this device")
+
+
+def _sympy_local_dict():
+    x, y = sympy.symbols("x y")
+    return {
+        "x": x,
+        "y": y,
+        "pi": sympy.pi,
+        "e": sympy.E,
+        "sqrt": sympy.sqrt,
+        "sin": sympy.sin,
+        "cos": sympy.cos,
+        "tan": sympy.tan,
+        "asin": sympy.asin,
+        "acos": sympy.acos,
+        "atan": sympy.atan,
+        # Match our own calculator's convention: "log" = base 10,
+        # "ln" = natural log (sympy's native log() defaults to natural).
+        "log": lambda z: sympy.log(z, 10),
+        "ln": sympy.log,
+        "logb": lambda z, b: sympy.log(z, b),
+        "fact": sympy.factorial,
+        "abs": sympy.Abs,
+    }
+
+
+def sympy_parse(expression):
+    _require_sympy()
+    expression = expression.strip()
+    expression = expression.replace("×", "*")
+    expression = expression.replace("÷", "/")
+    expression = expression.replace("^", "**")
+    expression = expression.replace("π", "pi")
+    return parse_expr(
+        expression,
+        transformations=_SYMPY_TRANSFORMATIONS,
+        local_dict=_sympy_local_dict(),
+    )
+
+
+def format_sympy(value):
+    return str(value).replace("**", "^")
+
+
+def symbolic_solve(equation):
+    """Solves ANY equation exactly - any degree, trig, logs, etc. - not
+    just linear/quadratic/2-variable-linear like the numeric solver.
+    Can also return complex solutions where they exist."""
+    _require_sympy()
+    if "=" not in equation:
+        raise ValueError("Equation must contain '='")
+
+    left, right = equation.split("=", 1)
+    x = sympy.symbols("x")
+    lhs = sympy_parse(left)
+    rhs = sympy_parse(right)
+
+    try:
+        solutions = sympy.solve(sympy.Eq(lhs, rhs), x)
+    except NotImplementedError:
+        raise ValueError("No exact solution found - try a numeric Solve option instead")
+
+    if not solutions:
+        raise ValueError("No solution found")
+
+    return [format_sympy(s) for s in solutions]
+
+
+def symbolic_simplify(expression):
+    _require_sympy()
+    return format_sympy(sympy.simplify(sympy_parse(expression)))
+
+
+def symbolic_expand(expression):
+    _require_sympy()
+    return format_sympy(sympy.expand(sympy_parse(expression)))
+
+
+def symbolic_derivative(expression, order=1):
+    _require_sympy()
+    x = sympy.symbols("x")
+    expr = sympy_parse(expression)
+    try:
+        return format_sympy(sympy.diff(expr, x, order))
+    except NotImplementedError:
+        raise ValueError("No exact derivative found")
+
+
+def symbolic_integral(expression, a=None, b=None):
+    _require_sympy()
+    x = sympy.symbols("x")
+    expr = sympy_parse(expression)
+    try:
+        if a is None or b is None:
+            return format_sympy(sympy.integrate(expr, x))
+        return format_sympy(
+            sympy.integrate(expr, (x, sympy.sympify(a), sympy.sympify(b)))
+        )
+    except NotImplementedError:
+        raise ValueError("No exact integral found - try the numeric Integrate option instead")
 
 
 # ----------------------------------------------------------------------
@@ -1028,11 +1331,13 @@ class Calculator(BoxLayout):
 
         self.update_memory_indicator()
 
-        if self.history:
-            self.history_label.text = "\n".join(
-                f"{expr} = {self.format_number(ans)}"
-                for expr, ans in self.history[-3:]
-            )
+        # Deliberately NOT restoring the on-screen "last calculation"
+        # preview here - that would mean the welcome message never comes
+        # back once you've calculated anything once, ever. The actual
+        # history data is still fully restored above (for the History
+        # popup, Steps, tap-to-reuse, etc.) - only this small preview
+        # label stays on its default "Welcome" text until you do a new
+        # calculation in the current session.
 
     # ------------------------------------------------------------------
     # Layout helpers
@@ -1575,6 +1880,42 @@ class Calculator(BoxLayout):
     # History popup (scrollable, tap to reuse, clearable)
     # ------------------------------------------------------------------
 
+    def show_steps_popup(self, title, lines):
+        scroll = ScrollView()
+        steps_grid = GridLayout(
+            cols=1,
+            spacing=dp(6),
+            padding=dp(10),
+            size_hint_y=None,
+        )
+        steps_grid.bind(minimum_height=steps_grid.setter("height"))
+
+        if not lines:
+            steps_grid.add_widget(Label(
+                text="No steps to show for this.",
+                size_hint_y=None, height=dp(40),
+            ))
+        else:
+            for i, line in enumerate(lines, start=1):
+                step_label = Label(
+                    text=f"{i}. {line}",
+                    size_hint_y=None, height=dp(36),
+                    font_size="14sp", halign="left", valign="middle",
+                )
+                step_label.bind(size=self.update_text_size)
+                steps_grid.add_widget(step_label)
+
+        scroll.add_widget(steps_grid)
+
+        outer = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(6))
+        outer.add_widget(scroll)
+        close_button = Button(text="Close", size_hint_y=None, height=dp(45))
+        outer.add_widget(close_button)
+
+        popup = self.make_sheet_popup(title, outer, height=0.6)
+        close_button.bind(on_press=popup.dismiss)
+        popup.open()
+
     def show_history(self):
         popup_layout = BoxLayout(
             orientation="vertical",
@@ -1600,10 +1941,16 @@ class Calculator(BoxLayout):
 
             for expr, ans in reversed(self.history):
                 entry_text = f"{expr} = {self.format_number(ans)}"
-                entry_button = Button(
-                    text=entry_text,
+
+                row = BoxLayout(
+                    orientation="horizontal",
                     size_hint_y=None,
                     height=dp(45),
+                    spacing=dp(4),
+                )
+
+                entry_button = Button(
+                    text=entry_text,
                     halign="left",
                 )
 
@@ -1612,8 +1959,24 @@ class Calculator(BoxLayout):
                     self.expression += self.format_number(answer)
                     self.update_display()
 
+                def view_steps(instance, expression=expr):
+                    trace = []
+                    try:
+                        self.engine.evaluate(expression, trace=trace)
+                    except Exception:
+                        pass
+                    self.show_steps_popup(f"How: {expression}", trace)
+
+                steps_button = Button(
+                    text="Steps",
+                    size_hint_x=0.28,
+                )
+
                 entry_button.bind(on_press=reuse)
-                history_grid.add_widget(entry_button)
+                steps_button.bind(on_press=view_steps)
+                row.add_widget(entry_button)
+                row.add_widget(steps_button)
+                history_grid.add_widget(row)
 
         rebuild_history_grid()
 
@@ -1716,6 +2079,8 @@ class Calculator(BoxLayout):
         )
         layout.bind(minimum_height=layout.setter("height"))
 
+        last_steps = {"prime": [], "gcd_lcm": [], "fraction": []}
+
         layout.add_widget(Label(
             text="Prime check & factorization",
             size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
@@ -1726,23 +2091,31 @@ class Calculator(BoxLayout):
         def check_prime(instance):
             try:
                 n = int(float(n_field.text))
-                verdict = "prime" if is_prime(n) else "not prime"
-                n_result.text = f"{n} is {verdict}"
+                verdict, steps = is_prime_steps(n)
+                n_result.text = f"{n} is {'prime' if verdict else 'not prime'}"
+                last_steps["prime"] = steps
             except Exception as exc:
                 n_result.text = f"Error: {exc}"
+                last_steps["prime"] = []
 
         def factorize(instance):
             try:
                 n = int(float(n_field.text))
-                factors = prime_factorize(n)
+                factors, steps = prime_factorize_steps(n)
                 n_result.text = format_prime_factors(factors)
+                last_steps["prime"] = steps
             except Exception as exc:
                 n_result.text = f"Error: {exc}"
+                last_steps["prime"] = []
+
+        def view_prime_steps(instance):
+            self.show_steps_popup("How this was worked out", last_steps["prime"])
 
         self._action_row(layout, [
             ("Is Prime?", check_prime),
             ("Prime Factors", factorize),
         ])
+        self._action_row(layout, [("View Steps", view_prime_steps)])
 
         layout.add_widget(Label(
             text="GCD & LCM",
@@ -1755,21 +2128,31 @@ class Calculator(BoxLayout):
         def compute_gcd(instance):
             try:
                 a, b = int(float(a_field.text)), int(float(b_field.text))
-                ab_result.text = f"GCD = {gcd_of(a, b)}"
+                result, steps = gcd_steps(a, b)
+                ab_result.text = f"GCD = {result}"
+                last_steps["gcd_lcm"] = steps
             except Exception as exc:
                 ab_result.text = f"Error: {exc}"
+                last_steps["gcd_lcm"] = []
 
         def compute_lcm(instance):
             try:
                 a, b = int(float(a_field.text)), int(float(b_field.text))
-                ab_result.text = f"LCM = {lcm_of(a, b)}"
+                result, steps = lcm_steps(a, b)
+                ab_result.text = f"LCM = {result}"
+                last_steps["gcd_lcm"] = steps
             except Exception as exc:
                 ab_result.text = f"Error: {exc}"
+                last_steps["gcd_lcm"] = []
+
+        def view_gcd_lcm_steps(instance):
+            self.show_steps_popup("How this was worked out", last_steps["gcd_lcm"])
 
         self._action_row(layout, [
             ("GCD", compute_gcd),
             ("LCM", compute_lcm),
         ])
+        self._action_row(layout, [("View Steps", view_gcd_lcm_steps)])
 
         layout.add_widget(Label(
             text="Simplify a fraction",
@@ -1782,15 +2165,21 @@ class Calculator(BoxLayout):
         def simplify(instance):
             try:
                 num, den = int(float(num_field.text)), int(float(den_field.text))
-                n, d = simplify_fraction(num, den)
+                (n, d), steps = simplify_fraction_steps(num, den)
                 frac_result.text = f"= {n}/{d}"
+                last_steps["fraction"] = steps
             except Exception as exc:
                 frac_result.text = f"Error: {exc}"
+                last_steps["fraction"] = []
+
+        def view_fraction_steps(instance):
+            self.show_steps_popup("How this was worked out", last_steps["fraction"])
 
         self._action_row(layout, [("Simplify", simplify)])
+        self._action_row(layout, [("View Steps", view_fraction_steps)])
 
         scroll.add_widget(layout)
-        popup = self.make_sheet_popup("Number Theory", scroll, height=0.75)
+        popup = self.make_sheet_popup("Number Theory", scroll, height=0.85)
         popup.open()
 
     # ------------------------------------------------------------------
@@ -1813,24 +2202,84 @@ class Calculator(BoxLayout):
         ))
         eq_field = self._labeled_input(layout, "Equation")
         eq_result = self._result_label(layout, height=dp(50))
+        eq_last_steps = {"lines": []}
 
         def do_linear(instance):
             try:
-                x = solve_linear(self.engine, eq_field.text)
+                steps = []
+                x = solve_linear(self.engine, eq_field.text, steps=steps)
                 eq_result.text = f"x = {format_plain_number(x)}"
+                eq_last_steps["lines"] = steps
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
+                eq_last_steps["lines"] = []
 
         def do_quadratic(instance):
             try:
-                roots = solve_quadratic(self.engine, eq_field.text)
+                steps = []
+                roots = solve_quadratic(self.engine, eq_field.text, steps=steps)
                 eq_result.text = "x = " + ", ".join(format_plain_number(r) for r in roots)
+                eq_last_steps["lines"] = steps
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
+                eq_last_steps["lines"] = []
+
+        def do_exact_solve(instance):
+            try:
+                solutions = symbolic_solve(eq_field.text)
+                eq_result.text = "x = " + ", ".join(solutions)
+                eq_last_steps["lines"] = [
+                    "Solved exactly using symbolic algebra (sympy) - "
+                    "detailed step-by-step algebra isn't available for exact "
+                    "mode, but the answer is precise, not approximated."
+                ]
+            except Exception as exc:
+                eq_result.text = f"Error: {exc}"
+                eq_last_steps["lines"] = []
+
+        def view_eq_steps(instance):
+            self.show_steps_popup("How this was solved", eq_last_steps["lines"])
 
         self._action_row(layout, [
             ("Solve Linear", do_linear),
             ("Solve Quadratic", do_quadratic),
+        ])
+        self._action_row(layout, [("Solve (Exact)", do_exact_solve)])
+        self._action_row(layout, [("View Steps", view_eq_steps)])
+
+        note = Label(
+            text=(
+                "'Solve (Exact)' handles ANY equation - any degree, trig, "
+                "logs - and gives exact answers (fractions, exact roots, "
+                "even complex solutions) instead of decimal approximations."
+            ),
+            size_hint_y=None, height=dp(50), font_size="11sp",
+        )
+        note.bind(size=self.update_text_size)
+        layout.add_widget(note)
+
+        layout.add_widget(Label(
+            text="Simplify or expand an expression",
+            size_hint_y=None, height=dp(24), font_size="13sp", bold=True,
+        ))
+        simplify_field = self._labeled_input(layout, "Expression, e.g. sin(x)^2+cos(x)^2")
+        simplify_result = self._result_label(layout, height=dp(40))
+
+        def do_simplify(instance):
+            try:
+                simplify_result.text = "= " + symbolic_simplify(simplify_field.text)
+            except Exception as exc:
+                simplify_result.text = f"Error: {exc}"
+
+        def do_expand(instance):
+            try:
+                simplify_result.text = "= " + symbolic_expand(simplify_field.text)
+            except Exception as exc:
+                simplify_result.text = f"Error: {exc}"
+
+        self._action_row(layout, [
+            ("Simplify", do_simplify),
+            ("Expand", do_expand),
         ])
 
         layout.add_widget(Label(
@@ -1840,15 +2289,23 @@ class Calculator(BoxLayout):
         eq1_field = self._labeled_input(layout, "Equation 1, e.g. 2*x+y=5")
         eq2_field = self._labeled_input(layout, "Equation 2, e.g. x-y=1")
         sim_result = self._result_label(layout, height=dp(40))
+        sim_last_steps = {"lines": []}
 
         def do_simultaneous(instance):
             try:
-                x, y = solve_simultaneous(self.engine, eq1_field.text, eq2_field.text)
+                steps = []
+                x, y = solve_simultaneous(self.engine, eq1_field.text, eq2_field.text, steps=steps)
                 sim_result.text = f"x = {format_plain_number(x)}, y = {format_plain_number(y)}"
+                sim_last_steps["lines"] = steps
             except Exception as exc:
                 sim_result.text = f"Error: {exc}"
+                sim_last_steps["lines"] = []
+
+        def view_sim_steps(instance):
+            self.show_steps_popup("How this was solved", sim_last_steps["lines"])
 
         self._action_row(layout, [("Solve Simultaneous", do_simultaneous)])
+        self._action_row(layout, [("View Steps", view_sim_steps)])
 
         scroll.add_widget(layout)
         popup = self.make_sheet_popup("Algebra", scroll, height=0.75)
@@ -1875,6 +2332,7 @@ class Calculator(BoxLayout):
         expr_field = self._labeled_input(layout, "f(x)")
         point_field = self._labeled_input(layout, "x =")
         calc_result = self._result_label(layout, height=dp(60))
+        calc_last_steps = {"lines": []}
 
         def with_radians(func):
             previous_mode = self.engine.angle_mode
@@ -1887,12 +2345,26 @@ class Calculator(BoxLayout):
         def do_derivative(instance):
             try:
                 x0 = float(point_field.text)
-                value = with_radians(
-                    lambda: numerical_derivative(self.engine, expr_field.text, x0)
+                h = 1e-5
+                f_plus, f_minus, value = with_radians(
+                    lambda: (
+                        self.engine.evaluate(expr_field.text, variables={"x": x0 + h}),
+                        self.engine.evaluate(expr_field.text, variables={"x": x0 - h}),
+                        numerical_derivative(self.engine, expr_field.text, x0),
+                    )
                 )
                 calc_result.text = f"f'({format_plain_number(x0)}) \u2248 {format_plain_number(value)}"
+                calc_last_steps["lines"] = [
+                    f"Uses a tiny step h = {h}",
+                    f"f({format_plain_number(x0)}+h) = {format_plain_number(f_plus)}",
+                    f"f({format_plain_number(x0)}-h) = {format_plain_number(f_minus)}",
+                    f"slope \u2248 (f(x+h) - f(x-h)) \u00f7 (2h) = "
+                    f"({format_plain_number(f_plus)} - {format_plain_number(f_minus)}) \u00f7 {2*h} "
+                    f"= {format_plain_number(value)}",
+                ]
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
+                calc_last_steps["lines"] = []
 
         def do_second_derivative(instance):
             try:
@@ -1901,8 +2373,14 @@ class Calculator(BoxLayout):
                     lambda: numerical_second_derivative(self.engine, expr_field.text, x0)
                 )
                 calc_result.text = f"f''({format_plain_number(x0)}) \u2248 {format_plain_number(value)}"
+                calc_last_steps["lines"] = [
+                    "Uses the same finite-difference idea, applied twice",
+                    "f''(x) \u2248 (f(x+h) - 2f(x) + f(x-h)) \u00f7 h\u00b2",
+                    f"Result: {format_plain_number(value)}",
+                ]
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
+                calc_last_steps["lines"] = []
 
         def do_limit(instance):
             try:
@@ -1911,14 +2389,39 @@ class Calculator(BoxLayout):
                     lambda: numerical_limit(self.engine, expr_field.text, x0)
                 )
                 calc_result.text = f"limit at x={format_plain_number(x0)} \u2248 {format_plain_number(value)}"
+                calc_last_steps["lines"] = [
+                    f"Evaluated f(x) just below and just above x={format_plain_number(x0)}",
+                    "If both sides agree closely, that shared value is the limit",
+                    f"Result: {format_plain_number(value)}",
+                ]
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
+                calc_last_steps["lines"] = []
+
+        def do_exact_derivative(instance):
+            try:
+                result = symbolic_derivative(expr_field.text)
+                calc_result.text = f"f'(x) = {result}"
+                calc_last_steps["lines"] = [
+                    "Computed using symbolic algebra (sympy) - an exact "
+                    "formula, not a numerical estimate. Detailed rule-by-rule "
+                    "working (power rule, chain rule, etc.) isn't shown."
+                ]
+            except Exception as exc:
+                calc_result.text = f"Error: {exc}"
+                calc_last_steps["lines"] = []
+
+        def view_calc_steps(instance):
+            self.show_steps_popup("How this was worked out", calc_last_steps["lines"])
 
         self._action_row(layout, [
             ("f'(x)", do_derivative),
             ("f''(x)", do_second_derivative),
             ("limit", do_limit),
         ])
+
+        self._action_row(layout, [("Exact f'(x)", do_exact_derivative)])
+        self._action_row(layout, [("View Steps", view_calc_steps)])
 
         layout.add_widget(Label(
             text="Definite integral, from a to b",
@@ -1927,6 +2430,7 @@ class Calculator(BoxLayout):
         a_field = self._labeled_input(layout, "a =")
         b_field = self._labeled_input(layout, "b =")
         integral_result = self._result_label(layout, height=dp(40))
+        integral_last_steps = {"lines": []}
 
         def do_integral(instance):
             try:
@@ -1935,18 +2439,51 @@ class Calculator(BoxLayout):
                     lambda: numerical_integral(self.engine, expr_field.text, a, b)
                 )
                 integral_result.text = f"\u222b f(x) dx \u2248 {format_plain_number(value)}"
+                integral_last_steps["lines"] = [
+                    f"Split [{format_plain_number(a)}, {format_plain_number(b)}] into 1000 "
+                    "thin slices",
+                    "Used Simpson's rule to add up the area of each slice",
+                    f"Total \u2248 {format_plain_number(value)}",
+                ]
             except Exception as exc:
                 integral_result.text = f"Error: {exc}"
+                integral_last_steps["lines"] = []
 
-        self._action_row(layout, [("Integrate", do_integral)])
+        def do_exact_integral(instance):
+            try:
+                a_text, b_text = a_field.text.strip(), b_field.text.strip()
+                if a_text and b_text:
+                    result = symbolic_integral(expr_field.text, a_text, b_text)
+                    integral_result.text = f"\u222b f(x) dx = {result}"
+                else:
+                    result = symbolic_integral(expr_field.text)
+                    integral_result.text = f"\u222b f(x) dx = {result} + C"
+                integral_last_steps["lines"] = [
+                    "Computed using symbolic algebra (sympy) - an exact "
+                    "closed-form answer, not an approximation."
+                ]
+            except Exception as exc:
+                integral_result.text = f"Error: {exc}"
+                integral_last_steps["lines"] = []
+
+        def view_integral_steps(instance):
+            self.show_steps_popup("How this was worked out", integral_last_steps["lines"])
+
+        self._action_row(layout, [
+            ("Integrate", do_integral),
+            ("Exact Integral", do_exact_integral),
+        ])
+        self._action_row(layout, [("View Steps", view_integral_steps)])
 
         note = Label(
             text=(
-                "Note: results are close numerical approximations, "
-                "not exact symbolic answers. Trig functions here always "
-                "use radians, regardless of the Scientific DEG/RAD setting."
+                "Note: the plain buttons give close numerical "
+                "approximations. 'Exact' buttons give exact symbolic "
+                "formulas instead (leave a/b blank for an indefinite "
+                "exact integral). Trig here always uses radians, "
+                "regardless of the Scientific DEG/RAD setting."
             ),
-            size_hint_y=None, height=dp(50), font_size="11sp",
+            size_hint_y=None, height=dp(64), font_size="11sp",
         )
         note.bind(size=self.update_text_size)
         layout.add_widget(note)
@@ -2175,13 +2712,38 @@ class Calculator(BoxLayout):
                         f"{format_plain_number(value)} {state['from_unit']} = "
                         f"{format_plain_number(converted)} {state['to_unit']}"
                     )
+                    if category == "Temperature":
+                        state["last_steps"] = [
+                            f"Temperature uses a formula, not a simple factor, "
+                            f"since {state['from_unit']} and {state['to_unit']} "
+                            f"don't share a common zero point",
+                            f"Result: {format_plain_number(converted)} {state['to_unit']}",
+                        ]
+                    else:
+                        units = CONVERSION_CATEGORIES[category]
+                        from_factor = units[state["from_unit"]]
+                        to_factor = units[state["to_unit"]]
+                        state["last_steps"] = [
+                            f"1 {state['from_unit']} = {format_plain_number(from_factor)} base units",
+                            f"1 {state['to_unit']} = {format_plain_number(to_factor)} base units",
+                            f"{format_plain_number(value)} \u00d7 {format_plain_number(from_factor)} "
+                            f"\u00f7 {format_plain_number(to_factor)} = {format_plain_number(converted)}",
+                        ]
                 except Exception as exc:
                     result_label.text = f"Error: {exc}"
+                    state["last_steps"] = []
+
+            def view_conversion_steps(instance):
+                self.show_steps_popup("How this was worked out", state.get("last_steps", []))
 
             convert_button = Button(text="Convert", size_hint_y=None, height=dp(40))
             convert_button.bind(on_press=do_convert)
             units_area.add_widget(convert_button)
             units_area.add_widget(result_label)
+
+            steps_button = Button(text="View Steps", size_hint_y=None, height=dp(40))
+            steps_button.bind(on_press=view_conversion_steps)
+            units_area.add_widget(steps_button)
 
         rebuild_units_area()
 

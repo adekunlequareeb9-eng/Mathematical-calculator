@@ -33,17 +33,50 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install buildozer cython==0.29.36
 
+      # Fix for "I have to uninstall the old APK before installing the
+      # new one". GitHub Actions gives us a brand-new, empty machine every
+      # single run. Without this cache, Android's build tools generate a
+      # random new debug signing key on every build, so every APK ends up
+      # signed differently - and Android refuses to install an app over a
+      # previous version signed with a different key. Caching this one
+      # file means every build after the first reuses the SAME signing
+      # key, so future APKs install as a normal update, no uninstall
+      # needed.
       - name: Cache Android debug keystore
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
           key: android-debug-keystore-v1
 
+      # Diagnostic - proves whether the cache actually restored a
+      # keystore from a previous run, or whether this run is starting
+      # fresh. Compare this output between two consecutive builds: if the
+      # SHA256 is identical both times, the signing key truly is stable
+      # and something else is causing the "must uninstall" problem. If it
+      # differs between builds, the cache isn't actually being reused.
+      - name: Check debug keystore status (before build)
+        run: |
+          if [ -f ~/.android/debug.keystore ]; then
+            echo "Keystore already exists (cache HIT or reused from earlier in this run)."
+            sha256sum ~/.android/debug.keystore
+          else
+            echo "No keystore yet - this run will create a brand-new one (expected on the very first run after adding this cache step)."
+          fi
+
       - name: Build APK
         env:
           PIP_CONSTRAINT: ${{ github.workspace }}/constraints.txt
         run: |
           yes | buildozer android debug
+
+      - name: Check debug keystore status (after build)
+        run: |
+          if [ -f ~/.android/debug.keystore ]; then
+            echo "Keystore after build:"
+            sha256sum ~/.android/debug.keystore
+          else
+            echo "WARNING: no keystore found at ~/.android/debug.keystore after the build. This means the build is signing with a keystore somewhere else, and caching this path won't help - if you see this, paste this whole log back so the fix can be aimed at the right file."
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
