@@ -4,6 +4,8 @@ import math
 import operator
 import os
 import re
+import tempfile
+import time
 from fractions import Fraction
 
 try:
@@ -437,6 +439,37 @@ def _equation_sides(equation):
     return left.strip(), right.strip()
 
 
+def _format_linear_form(coefficient, constant):
+    """Formats a×x + b as a clean string like '2x - 4' instead of the
+    awkward '2x + -4'."""
+    coeff_str = format_plain_number(coefficient)
+    if constant == 0:
+        return f"{coeff_str}x"
+    sign = "+" if constant > 0 else "-"
+    return f"{coeff_str}x {sign} {format_plain_number(abs(constant))}"
+
+
+def _format_quadratic_form(a, b, c):
+    """Formats a×x² + b×x + c as a clean string like 'x² - 5x + 6'
+    instead of the awkward '1x² + -5x + 6'."""
+    a_num = format_plain_number(abs(a))
+    a_term = "x\u00b2" if abs(a) == 1 else f"{a_num}x\u00b2"
+    if a < 0:
+        a_term = "-" + a_term
+
+    parts = [a_term]
+
+    if b != 0:
+        b_num = format_plain_number(abs(b))
+        b_term = "x" if abs(b) == 1 else f"{b_num}x"
+        parts.append(("+ " if b > 0 else "- ") + b_term)
+
+    if c != 0:
+        parts.append(("+ " if c > 0 else "- ") + format_plain_number(abs(c)))
+
+    return " ".join(parts)
+
+
 def solve_linear(engine, equation, steps=None):
     left, right = _equation_sides(equation)
 
@@ -457,13 +490,28 @@ def solve_linear(engine, equation, steps=None):
         raise ValueError("No solution")
 
     result = -y0 / a
+    b = y0
 
     if steps is not None:
-        steps.append(f"Rewrite as: ({left}) - ({right}) = 0")
-        steps.append(f"At x=0, this equals {format_plain_number(y0)}")
-        steps.append(f"At x=1, this equals {format_plain_number(y1)}")
-        steps.append(f"So the equation is: {format_plain_number(a)}\u00d7x + {format_plain_number(y0)} = 0")
-        steps.append(f"x = -({format_plain_number(y0)}) \u00f7 {format_plain_number(a)} = {format_plain_number(result)}")
+        steps.append(f"Start: {equation}")
+        steps.append(
+            f"Move everything to one side so it says '(a number)\u00d7x plus "
+            f"(a number) = 0'. Here that's: {_format_linear_form(a, b)} = 0"
+        )
+        if b != 0:
+            if b > 0:
+                move_phrase = f"Subtract {format_plain_number(b)} from both sides"
+            else:
+                move_phrase = f"Add {format_plain_number(abs(b))} to both sides"
+            steps.append(
+                f"{move_phrase} to get x's term alone: "
+                f"{format_plain_number(a)}x = {format_plain_number(-b)}"
+            )
+        steps.append(
+            f"Divide both sides by {format_plain_number(a)} to get x by "
+            f"itself: x = {format_plain_number(-b)} \u00f7 {format_plain_number(a)} "
+            f"= {format_plain_number(result)}"
+        )
 
     return result
 
@@ -487,27 +535,40 @@ def solve_quadratic(engine, equation, steps=None):
             raise ValueError("No unique solution")
         result = [-coeff_c / coeff_b]
         if steps is not None:
-            steps.append("The x\u00b2 coefficient is 0 - this is actually linear")
+            steps.append("There's no x\u00b2 in this equation once simplified - it's actually a simple, one-solution equation")
             steps.append(f"x = {format_plain_number(result[0])}")
         return result
 
     discriminant = coeff_b * coeff_b - 4 * coeff_a * coeff_c
+    a_str = format_plain_number(coeff_a)
+    b_str = format_plain_number(coeff_b)
+    c_str = format_plain_number(coeff_c)
 
     if steps is not None:
-        steps.append(f"Rewrite as: ({left}) - ({right}) = 0")
+        steps.append(f"Start: {equation}")
         steps.append(
-            f"Matching to a\u00d7x\u00b2+b\u00d7x+c: a={format_plain_number(coeff_a)}, "
-            f"b={format_plain_number(coeff_b)}, c={format_plain_number(coeff_c)}"
+            f"Move everything to one side, in the form "
+            f"(a number)\u00d7x\u00b2 + (a number)\u00d7x + (a number) = 0. "
+            f"Here that's: {_format_quadratic_form(coeff_a, coeff_b, coeff_c)} = 0"
         )
         steps.append(
-            f"Discriminant = b\u00b2-4ac = {format_plain_number(coeff_b)}\u00b2 - "
-            f"4\u00d7{format_plain_number(coeff_a)}\u00d7{format_plain_number(coeff_c)} "
+            "There's a standard formula for exactly this shape of equation: "
+            "x = (-b \u00b1 \u221a(b\u00b2-4ac)) \u00f7 (2a) - using the three numbers "
+            "above as a, b, and c"
+        )
+        steps.append(
+            f"First work out what's under the square root sign: "
+            f"b\u00b2 - 4ac = {b_str}\u00b2 - 4\u00d7{a_str}\u00d7{c_str} "
             f"= {format_plain_number(discriminant)}"
         )
 
     if discriminant < 0:
         if steps is not None:
-            steps.append("Discriminant is negative - no real roots")
+            steps.append(
+                "That number came out negative, and you can't take the "
+                "square root of a negative number (not with ordinary "
+                "numbers, anyway) - so there's no real answer to this one"
+            )
         raise ValueError("No real roots")
 
     sqrt_d = math.sqrt(discriminant)
@@ -516,13 +577,18 @@ def solve_quadratic(engine, equation, steps=None):
     result = sorted({round(x1, 10), round(x2, 10)})
 
     if steps is not None:
-        steps.append(f"\u221a discriminant = {format_plain_number(sqrt_d)}")
         steps.append(
-            f"x = (-b \u00b1 \u221a discriminant) \u00f7 (2a) = "
-            f"({format_plain_number(-coeff_b)} \u00b1 {format_plain_number(sqrt_d)}) \u00f7 "
-            f"{format_plain_number(2 * coeff_a)}"
+            f"That's positive, so there'll be two answers. Its square "
+            f"root is {format_plain_number(sqrt_d)}"
         )
-        steps.append("x = " + ", ".join(format_plain_number(r) for r in result))
+        steps.append(
+            f"Plug everything into the formula: x = (-({b_str}) \u00b1 "
+            f"{format_plain_number(sqrt_d)}) \u00f7 (2\u00d7{a_str})"
+        )
+        steps.append(
+            "The \u00b1 means do it once with + and once with - to get "
+            "both answers: x = " + " or x = ".join(format_plain_number(r) for r in result)
+        )
 
     return result
 
@@ -557,17 +623,23 @@ def solve_simultaneous(engine, equation1, equation2, steps=None):
     y = (a1 * c2 - a2 * c1) / det
 
     if steps is not None:
+        a1_str, b1_str, c1_str = format_plain_number(a1), format_plain_number(b1), format_plain_number(c1)
+        a2_str, b2_str, c2_str = format_plain_number(a2), format_plain_number(b2), format_plain_number(c2)
+        steps.append(f"Equation 1, simplified: {a1_str}\u00d7x + {b1_str}\u00d7y = {c1_str}")
+        steps.append(f"Equation 2, simplified: {a2_str}\u00d7x + {b2_str}\u00d7y = {c2_str}")
         steps.append(
-            f"Equation 1 as a\u00d7x+b\u00d7y=c: {format_plain_number(a1)}\u00d7x + "
-            f"{format_plain_number(b1)}\u00d7y = {format_plain_number(c1)}"
+            "With two equations and two unknowns (x and y), there's a "
+            "shortcut formula that solves both at once by combining the "
+            "numbers above - you don't need to follow the formula itself, "
+            "just know it takes those 6 numbers and produces x and y directly"
         )
         steps.append(
-            f"Equation 2 as a\u00d7x+b\u00d7y=c: {format_plain_number(a2)}\u00d7x + "
-            f"{format_plain_number(b2)}\u00d7y = {format_plain_number(c2)}"
+            f"That gives: x = {format_plain_number(x)}, y = {format_plain_number(y)}"
         )
-        steps.append(f"Determinant = a1\u00d7b2 - a2\u00d7b1 = {format_plain_number(det)}")
-        steps.append(f"x = (c1\u00d7b2 - c2\u00d7b1) \u00f7 determinant = {format_plain_number(x)}")
-        steps.append(f"y = (a1\u00d7c2 - a2\u00d7c1) \u00f7 determinant = {format_plain_number(y)}")
+        steps.append(
+            "You can check this yourself: put these x and y values back "
+            "into both original equations and they should both come out true"
+        )
 
     return x, y
 
@@ -674,21 +746,30 @@ def format_sympy(value):
     return str(value).replace("**", "^")
 
 
-def symbolic_solve(equation):
+def symbolic_solve(equation, solve_for="x"):
     """Solves ANY equation exactly - any degree, trig, logs, etc. - not
     just linear/quadratic/2-variable-linear like the numeric solver.
-    Can also return complex solutions where they exist."""
+    Can also return complex solutions where they exist.
+
+    solve_for lets you solve an equation with two unknowns (e.g.
+    '6x+15-3y=0') for whichever one you actually want isolated - the
+    other variable is treated as a parameter and appears in the answer,
+    e.g. solving for y gives 'y = 2x + 5'."""
     _require_sympy()
     if "=" not in equation:
         raise ValueError("Equation must contain '='")
 
+    solve_for = solve_for.strip() or "x"
     left, right = equation.split("=", 1)
-    x = sympy.symbols("x")
+    target = sympy.symbols(solve_for)
     lhs = sympy_parse(left)
     rhs = sympy_parse(right)
 
+    if target not in lhs.free_symbols and target not in rhs.free_symbols:
+        raise ValueError(f"'{solve_for}' doesn't appear in that equation")
+
     try:
-        solutions = sympy.solve(sympy.Eq(lhs, rhs), x)
+        solutions = sympy.solve(sympy.Eq(lhs, rhs), target)
     except NotImplementedError:
         raise ValueError("No exact solution found - try a numeric Solve option instead")
 
@@ -988,6 +1069,195 @@ def convert_temperature(value, from_unit, to_unit):
     if to_unit == "K":
         return celsius + 273.15
     raise ValueError("Unknown temperature unit")
+
+
+# ----------------------------------------------------------------------
+# Camera math scanning (Tier 1) - reads a single line of printed/typed
+# math from a photo using the phone's on-device text recognizer (Google
+# ML Kit via pyjnius). This section is fundamentally different from
+# everything else in this file: pyjnius and Android's native APIs only
+# exist on an actual Android device, so NONE of this could be run or
+# verified in the sandbox this app was otherwise built and tested in.
+# Every other feature in this app was verified against real, correct
+# output. This one could not be - it needs on-device testing, and
+# realistically some debugging, before it's fully reliable.
+# ----------------------------------------------------------------------
+
+class ScanUnavailable(Exception):
+    """Raised whenever camera scanning can't run - not on Android, ML Kit
+    missing, permission denied, cancelled, or the native call failed."""
+    pass
+
+
+def is_scan_available():
+    try:
+        import jnius  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def clean_scanned_text(text):
+    """Light cleanup of raw OCR output before showing it for review.
+    OCR commonly introduces a few specific issues with math text."""
+    if not text:
+        return ""
+
+    cleaned = text.replace("X", "x")
+    cleaned = cleaned.replace("\u2212", "-")   # unicode minus -> hyphen
+    cleaned = cleaned.replace("\u2044", "/")   # fraction slash -> /
+    cleaned = cleaned.replace("\u00d7", "\u00d7")
+    cleaned = cleaned.replace(" ", "")
+    cleaned = cleaned.replace("\n", " ")
+    return cleaned.strip()
+
+
+def pick_image_from_gallery(on_result):
+    """Launches Android's system photo picker. Calls on_result(path) with
+    a local file path once the user picks an image, or on_result(None) if
+    they cancel or something goes wrong.
+
+    Deliberately uses the gallery picker rather than live camera capture
+    for this first version - it's simpler, more standard, and doesn't
+    depend on Kivy's Camera widget (which has a history of inconsistent
+    behavior across Android manufacturers). The workflow is: take a photo
+    normally with the phone's own camera app first, then pick it here.
+    """
+    try:
+        from jnius import autoclass
+        from android import activity
+    except Exception as exc:
+        raise ScanUnavailable("Camera scanning only works on Android.") from exc
+
+    Intent = autoclass("android.content.Intent")
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+
+    request_code = 9001
+
+    def _on_activity_result(request, result_code, data):
+        if request != request_code:
+            return
+        activity.unbind(on_activity_result=_on_activity_result)
+        if data is None:
+            on_result(None)
+            return
+        try:
+            uri = data.getData()
+            path = _uri_to_file_path(uri)
+            on_result(path)
+        except Exception:
+            on_result(None)
+
+    activity.bind(on_activity_result=_on_activity_result)
+
+    intent = Intent(Intent.ACTION_GET_CONTENT)
+    intent.setType("image/*")
+    PythonActivity.mActivity.startActivityForResult(intent, request_code)
+
+
+def _uri_to_file_path(uri):
+    """Resolves a content:// URI to an actual file path, copying the
+    image to a temp file if Android won't give a direct path (common on
+    newer Android versions with scoped storage)."""
+    from jnius import autoclass
+
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    MediaStore = autoclass("android.provider.MediaStore")
+    context = PythonActivity.mActivity
+
+    cursor = context.getContentResolver().query(uri, None, None, None, None)
+    if cursor is not None:
+        try:
+            cursor.moveToFirst()
+            column_index = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+            if column_index != -1:
+                path = cursor.getString(column_index)
+                if path:
+                    return path
+        finally:
+            cursor.close()
+
+    input_stream = context.getContentResolver().openInputStream(uri)
+    fd, temp_path = tempfile.mkstemp(suffix=".jpg")
+    with os.fdopen(fd, "wb") as f:
+        buffer = bytearray(4096)
+        while True:
+            read = input_stream.read(buffer)
+            if read == -1:
+                break
+            f.write(bytes(buffer[:read]))
+    input_stream.close()
+    return temp_path
+
+
+def recognize_text_from_image(image_path):
+    """Runs Google ML Kit's on-device text recognizer against an image
+    file and returns the recognized text as a single string.
+
+    Uses a short blocking wait rather than a true async callback chain -
+    bridging Java's Task<T> async API into Python reliably via pyjnius is
+    one of the more fragile parts of this kind of integration, and a
+    simple bounded wait loop is easier to reason about and debug on a
+    real device than a fully async callback graph.
+    """
+    try:
+        from jnius import autoclass, PythonJavaClass, java_method
+    except Exception as exc:
+        raise ScanUnavailable("Camera scanning only works on Android.") from exc
+
+    try:
+        BitmapFactory = autoclass("android.graphics.BitmapFactory")
+        InputImage = autoclass("com.google.mlkit.vision.common.InputImage")
+        TextRecognition = autoclass("com.google.mlkit.vision.text.TextRecognition")
+        TextRecognizerOptions = autoclass(
+            "com.google.mlkit.vision.text.latin.TextRecognizerOptions"
+        )
+
+        bitmap = BitmapFactory.decodeFile(image_path)
+        if bitmap is None:
+            raise ScanUnavailable("Could not read that image file.")
+
+        image = InputImage.fromBitmap(bitmap, 0)
+        recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        task = recognizer.process(image)
+
+        result_holder = {"text": None, "error": None, "done": False}
+
+        class SuccessListener(PythonJavaClass):
+            __javainterfaces__ = ["com/google/android/gms/tasks/OnSuccessListener"]
+
+            @java_method("(Ljava/lang/Object;)V")
+            def onSuccess(self, result):
+                result_holder["text"] = result.getText()
+                result_holder["done"] = True
+
+        class FailureListener(PythonJavaClass):
+            __javainterfaces__ = ["com/google/android/gms/tasks/OnFailureListener"]
+
+            @java_method("(Ljava/lang/Exception;)V")
+            def onFailure(self, exception):
+                result_holder["error"] = str(exception.getMessage())
+                result_holder["done"] = True
+
+        task.addOnSuccessListener(SuccessListener())
+        task.addOnFailureListener(FailureListener())
+
+        waited = 0.0
+        while not result_holder["done"] and waited < 10.0:
+            time.sleep(0.1)
+            waited += 0.1
+
+        if result_holder["error"]:
+            raise ScanUnavailable(f"Text recognition failed: {result_holder['error']}")
+        if not result_holder["done"]:
+            raise ScanUnavailable("Text recognition timed out.")
+
+        return result_holder["text"] or ""
+
+    except ScanUnavailable:
+        raise
+    except Exception as exc:
+        raise ScanUnavailable(f"Scanning failed: {exc}") from exc
 
 
 OPERATOR_CHARS = {"+", "-", "×", "÷", "^", "%"}
@@ -1793,6 +2063,7 @@ class Calculator(BoxLayout):
             ("\U0001F4BE Memory", self.show_memory),
             ("\U0001F4DC History", self.show_history),
             ("\u2699 Settings", self.show_settings),
+            ("\U0001F4F7 Scan", self.show_scan),
         ]
 
         for label, opener in tools:
@@ -2378,10 +2649,22 @@ class Calculator(BoxLayout):
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
 
+        layout.add_widget(Label(
+            text=(
+                "For an equation with two letters (e.g. 6*x+15-3*y=0), "
+                "type which one to solve for below - the other is treated "
+                "as a known value and appears in the answer"
+            ),
+            size_hint_y=None, height=dp(46), font_size="11sp",
+        ))
+        solve_for_field = self._labeled_input(layout, "Solve for")
+        solve_for_field.text = "x"
+
         def do_exact_solve(instance):
             try:
-                solutions = symbolic_solve(eq_field.text)
-                eq_result.text = "x = " + ", ".join(solutions)
+                target = solve_for_field.text.strip() or "x"
+                solutions = symbolic_solve(eq_field.text, solve_for=target)
+                eq_result.text = f"{target} = " + ", ".join(solutions)
                 eq_last_steps["lines"] = [
                     "Solved exactly using symbolic algebra (sympy) - "
                     "detailed step-by-step algebra isn't available for exact "
@@ -3113,6 +3396,96 @@ class Calculator(BoxLayout):
         popup.open()
 
         return popup, plot
+
+    def show_scan(self):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=dp(10),
+            padding=dp(10),
+        )
+
+        if not is_scan_available():
+            layout.add_widget(Label(
+                text=(
+                    "Camera scanning needs an actual Android device with "
+                    "Google Play Services - it isn't available here.\n\n"
+                    "Workflow: take a photo of a single line of printed "
+                    "math with your camera app, then come back here and "
+                    "choose that photo to read it."
+                ),
+                halign="center", valign="middle",
+            ))
+            close_button = Button(text="Close", size_hint_y=None, height=dp(45))
+            layout.add_widget(close_button)
+            popup = self.make_sheet_popup("Scan", layout, height=0.4)
+            close_button.bind(on_press=popup.dismiss)
+            popup.open()
+            return popup
+
+        status_label = Label(
+            text="Choose a photo of a single line of printed math.",
+            size_hint_y=None, height=dp(50),
+        )
+        status_label.bind(size=self.update_text_size)
+        layout.add_widget(status_label)
+
+        choose_button = Button(text="Choose Photo", size_hint_y=None, height=dp(45))
+        layout.add_widget(choose_button)
+
+        review_field = TextInput(
+            multiline=False,
+            hint_text="Recognized text will appear here for you to check",
+            size_hint_y=None, height=dp(45),
+        )
+        layout.add_widget(review_field)
+
+        insert_button = Button(
+            text="Insert Into Calculator", size_hint_y=None, height=dp(45),
+        )
+        layout.add_widget(insert_button)
+
+        close_button = Button(text="Close", size_hint_y=None, height=dp(45))
+        layout.add_widget(close_button)
+
+        def on_image_chosen(path):
+            if not path:
+                status_label.text = "Cancelled - no photo chosen."
+                return
+            status_label.text = "Reading text from photo..."
+            try:
+                raw_text = recognize_text_from_image(path)
+                cleaned = clean_scanned_text(raw_text)
+                review_field.text = cleaned
+                status_label.text = (
+                    "Check the text below before inserting - OCR isn't "
+                    "always perfect, fix anything that looks wrong."
+                )
+            except ScanUnavailable as exc:
+                status_label.text = f"Error: {exc}"
+
+        def do_choose(instance):
+            status_label.text = "Opening photo picker..."
+            try:
+                pick_image_from_gallery(on_image_chosen)
+            except ScanUnavailable as exc:
+                status_label.text = f"Error: {exc}"
+
+        def do_insert(instance):
+            if not review_field.text.strip():
+                status_label.text = "Nothing to insert yet."
+                return
+            self.reset_if_calculated()
+            self._insert_at_cursor(review_field.text.strip())
+            self.update_display()
+            status_label.text = "Inserted into the calculator."
+
+        choose_button.bind(on_press=do_choose)
+        insert_button.bind(on_press=do_insert)
+
+        popup = self.make_sheet_popup("Scan", layout, height=0.6)
+        close_button.bind(on_press=popup.dismiss)
+        popup.open()
+        return popup
 
     def show_settings(self):
         layout = BoxLayout(
