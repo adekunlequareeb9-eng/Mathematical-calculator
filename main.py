@@ -30,6 +30,7 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.graphics import Color, Line
+from kivy.animation import Animation
 
 
 Window.clearcolor = (0.04, 0.04, 0.06, 1)
@@ -61,7 +62,7 @@ class MathEngine:
     }
 
     def __init__(self):
-        self.angle_mode = "deg"  # "deg" or "rad"
+        self.angle_mode = "deg"  # "deg", "rad", or "grad"
 
         self.functions = {
             "sqrt": self._sqrt,
@@ -78,16 +79,25 @@ class MathEngine:
             "atan": lambda x: self._inverse_trig(math.atan, x),
         }
 
-    def _trig(self, func, x):
+    def _to_radians(self, x):
         if self.angle_mode == "deg":
-            x = math.radians(x)
-        return func(x)
+            return math.radians(x)
+        if self.angle_mode == "grad":
+            return x * math.pi / 200
+        return x
+
+    def _from_radians(self, x):
+        if self.angle_mode == "deg":
+            return math.degrees(x)
+        if self.angle_mode == "grad":
+            return x * 200 / math.pi
+        return x
+
+    def _trig(self, func, x):
+        return func(self._to_radians(x))
 
     def _inverse_trig(self, func, x):
-        result = func(x)
-        if self.angle_mode == "deg":
-            result = math.degrees(result)
-        return result
+        return self._from_radians(func(x))
 
     def _sqrt(self, x):
         if x < 0:
@@ -385,6 +395,33 @@ def simplify_fraction_steps(numerator, denominator):
         f"{denominator} \u00f7 {g} = {frac.denominator}",
     ]
     return (frac.numerator, frac.denominator), steps
+
+
+def to_mixed_number(numerator, denominator):
+    """Converts an improper fraction to a mixed number, e.g. 5/3 -> (1, 2, 3)
+    meaning '1 2/3'. Returns None for the whole-number part if the
+    fraction is already proper (abs value < 1)."""
+    if denominator == 0:
+        raise ZeroDivisionError("Cannot divide by zero")
+
+    frac = Fraction(int(numerator), int(denominator))
+    sign = -1 if frac < 0 else 1
+    whole = abs(frac.numerator) // frac.denominator
+    remainder = abs(frac.numerator) % frac.denominator
+
+    if remainder == 0:
+        return sign * whole, 0, 1
+
+    return sign * whole, remainder, frac.denominator
+
+
+def format_mixed_number(whole, remainder_numerator, remainder_denominator):
+    if remainder_numerator == 0:
+        return str(whole)
+    if whole == 0:
+        return f"{remainder_numerator}/{remainder_denominator}"
+    sign = "-" if whole < 0 else ""
+    return f"{sign}{abs(whole)} {remainder_numerator}/{remainder_denominator}"
 
 
 # ----------------------------------------------------------------------
@@ -1139,6 +1176,7 @@ class Calculator(BoxLayout):
         self.spacing = dp(6)
 
         self.expression = ""
+        self.cursor_pos = 0
         self.memory = 0
         self.engine = MathEngine()
         self.history = []
@@ -1220,7 +1258,20 @@ class Calculator(BoxLayout):
             color=(0.55, 0.55, 0.6, 1),
         )
         self.preview_label.bind(size=self.update_text_size)
-        self.add_widget(self.preview_label)
+
+        preview_row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=0.05,
+            spacing=dp(4),
+        )
+        cursor_left = Button(text="\u25c0", size_hint_x=None, width=dp(36), font_size="14sp")
+        cursor_right = Button(text="\u25b6", size_hint_x=None, width=dp(36), font_size="14sp")
+        cursor_left.bind(on_press=self.move_cursor_left)
+        cursor_right.bind(on_press=self.move_cursor_right)
+        preview_row.add_widget(cursor_left)
+        preview_row.add_widget(self.preview_label)
+        preview_row.add_widget(cursor_right)
+        self.add_widget(preview_row)
 
         buttons = [
             ["C", "⌫", "(", ")", "More"],
@@ -1249,6 +1300,7 @@ class Calculator(BoxLayout):
                     background_color=self.button_color(text),
                 )
                 button.bind(on_press=self.button_pressed)
+                button.bind(on_press=self._flash_button)
                 grid.add_widget(button)
 
         self.add_widget(grid)
@@ -1346,6 +1398,21 @@ class Calculator(BoxLayout):
     def update_text_size(self, widget, size):
         widget.text_size = size
 
+    def _flash_button(self, instance):
+        """Brief visual feedback on tap - purely cosmetic, wrapped in a
+        try/except so it can never interfere with the actual button
+        action even if something about the animation goes wrong."""
+        try:
+            original = instance.background_color
+            lighter = tuple(min(1.0, c + 0.25) for c in original[:3]) + (original[3],)
+            Animation.cancel_all(instance, "background_color")
+            (
+                Animation(background_color=lighter, duration=0.05)
+                + Animation(background_color=original, duration=0.15)
+            ).start(instance)
+        except Exception:
+            pass
+
     def make_sheet_popup(self, title, content, height=0.5):
         """A popup that behaves like a keyboard sheet - docked to the
         bottom of the screen, full width, and only as tall as it needs
@@ -1365,7 +1432,7 @@ class Calculator(BoxLayout):
         if text in ("C", "⌫"):
             return (0.7, 0.15, 0.18, 1)
 
-        if text in ("DEG", "RAD"):
+        if text in ("DEG", "RAD", "GRAD"):
             return (0.1, 0.55, 0.9, 1)
 
         if text in OPERATOR_CHARS:
@@ -1386,6 +1453,7 @@ class Calculator(BoxLayout):
         if self.display.text in ("Math Error", "Cannot divide by zero"):
             if value not in ("C", "⌫"):
                 self.expression = ""
+                self.cursor_pos = 0
                 self.display.text = "0"
 
         if value == "C":
@@ -1422,20 +1490,26 @@ class Calculator(BoxLayout):
 
         if value in ("(", ")"):
             self.reset_if_calculated()
-            self.expression += value
+            self._insert_at_cursor(value)
             self.update_display()
             return
 
         if value.isdigit():
             self.reset_if_calculated()
-            self.expression += value
+            self._insert_at_cursor(value)
             self.update_display()
             return
 
-        # Fallback for any unexpected label - just append it as typed.
+        # Fallback for any unexpected label - just insert it as typed.
         self.reset_if_calculated()
-        self.expression += value
+        self._insert_at_cursor(value)
         self.update_display()
+
+    def _insert_at_cursor(self, text):
+        self.expression = (
+            self.expression[:self.cursor_pos] + text + self.expression[self.cursor_pos:]
+        )
+        self.cursor_pos += len(text)
 
     # ------------------------------------------------------------------
     # Expression editing helpers (Phase 1 reliability)
@@ -1444,46 +1518,66 @@ class Calculator(BoxLayout):
     def reset_if_calculated(self):
         if self.just_calculated:
             self.expression = ""
+            self.cursor_pos = 0
             self.just_calculated = False
 
     def clear_all(self):
         self.expression = ""
+        self.cursor_pos = 0
         self.display.text = "0"
         self.preview_label.text = ""
         self.just_calculated = False
 
     def backspace(self):
-        self.expression = self.expression[:-1]
+        if self.cursor_pos > 0:
+            self.expression = (
+                self.expression[:self.cursor_pos - 1] + self.expression[self.cursor_pos:]
+            )
+            self.cursor_pos -= 1
         self.just_calculated = False
         self.update_display()
 
     def append_decimal(self):
         self.reset_if_calculated()
 
-        segment = re.split(r"[+\-×÷^%(]", self.expression)[-1] if self.expression else ""
+        before_cursor = self.expression[:self.cursor_pos]
+        segment = re.split(r"[+\-\u00d7\u00f7^%(]", before_cursor)[-1] if before_cursor else ""
         if "." in segment:
             return
 
-        self.expression += "0." if not segment else "."
+        insertion = "0." if not segment else "."
+        self.expression = (
+            self.expression[:self.cursor_pos] + insertion + self.expression[self.cursor_pos:]
+        )
+        self.cursor_pos += len(insertion)
         self.update_display()
 
     def append_operator(self, op):
         if not self.expression:
             if op == "-":
                 self.expression = "-"
+                self.cursor_pos = 1
                 self.update_display()
             return
 
-        last = self.expression[-1]
+        char_before = self.expression[self.cursor_pos - 1] if self.cursor_pos > 0 else ""
 
-        if last in OPERATOR_CHARS:
-            if op == "-" and last != "-":
+        if char_before in OPERATOR_CHARS:
+            if op == "-" and char_before != "-":
                 # allow forming a negative number, e.g. 5x-3
-                self.expression += op
+                self.expression = (
+                    self.expression[:self.cursor_pos] + op + self.expression[self.cursor_pos:]
+                )
+                self.cursor_pos += 1
             else:
-                self.expression = self.expression[:-1] + op
+                self.expression = (
+                    self.expression[:self.cursor_pos - 1] + op + self.expression[self.cursor_pos:]
+                )
         else:
-            self.expression += op
+            self.expression = (
+                self.expression[:self.cursor_pos] + op + self.expression[self.cursor_pos:]
+            )
+            self.cursor_pos += 1
 
         self.just_calculated = False
         self.update_display()
@@ -1491,22 +1585,38 @@ class Calculator(BoxLayout):
     def toggle_sign(self):
         self.reset_if_calculated()
 
-        match = re.search(r"(-?\d*\.?\d+)$", self.expression)
-        if not match:
-            if not self.expression:
-                self.expression = "-"
-                self.update_display()
-            return
+        before_cursor = self.expression[:self.cursor_pos]
+        match = re.search(r"(-?\d*\.?\d+)$", before_cursor)
 
-        number = match.group(1)
-        start = match.start(1)
+        if not match:
+            # No number ends right at the cursor - the cursor might be
+            # sitting right before a number instead (e.g. between an
+            # operator and the next digit), so check just after it too.
+            after_cursor = self.expression[self.cursor_pos:]
+            match_after = re.match(r"(-?\d*\.?\d+)", after_cursor)
+            if match_after:
+                number = match_after.group(1)
+                start = self.cursor_pos
+                end = self.cursor_pos + len(number)
+            elif not self.expression:
+                self.expression = "-"
+                self.cursor_pos = 1
+                self.update_display()
+                return
+            else:
+                return
+        else:
+            number = match.group(1)
+            start = match.start(1)
+            end = match.end(1)
 
         if number.startswith("-"):
             new_number = number[1:]
         else:
             new_number = "-" + number
 
-        self.expression = self.expression[:start] + new_number + self.expression[match.end(1):]
+        self.expression = self.expression[:start] + new_number + self.expression[end:]
+        self.cursor_pos = start + len(new_number)
         self.update_display()
 
     def wrap_whole(self, prefix, suffix=")"):
@@ -1514,17 +1624,39 @@ class Calculator(BoxLayout):
             self.expression = f"{prefix}{self.expression}{suffix}"
         else:
             self.expression = prefix
+        self.cursor_pos = len(self.expression)
         self.just_calculated = False
         self.update_display()
 
     def append_power(self, digit):
         self.append_operator("^")
-        self.expression += digit
+        self.expression = (
+            self.expression[:self.cursor_pos] + digit + self.expression[self.cursor_pos:]
+        )
+        self.cursor_pos += len(digit)
         self.update_display()
 
     def update_display(self):
-        self.display.text = self.expression or "0"
+        self.cursor_pos = max(0, min(self.cursor_pos, len(self.expression)))
+
+        if not self.expression:
+            self.display.text = "0"
+        elif self.cursor_pos >= len(self.expression):
+            self.display.text = self.expression
+        else:
+            self.display.text = (
+                self.expression[:self.cursor_pos] + "\u2502" + self.expression[self.cursor_pos:]
+            )
+
         self.update_preview()
+
+    def move_cursor_left(self, instance):
+        self.cursor_pos = max(0, self.cursor_pos - 1)
+        self.update_display()
+
+    def move_cursor_right(self, instance):
+        self.cursor_pos = min(len(self.expression), self.cursor_pos + 1)
+        self.update_display()
 
     def update_preview(self):
         """Shows a live '= result' preview as the expression is typed,
@@ -1573,6 +1705,7 @@ class Calculator(BoxLayout):
             self.history = self.history[-50:]
 
             self.expression = self.format_number(result)
+            self.cursor_pos = len(self.expression)
             self.display.text = self.expression
             self.preview_label.text = ""
             self.just_calculated = True
@@ -1588,18 +1721,21 @@ class Calculator(BoxLayout):
             self.display.text = "Cannot divide by zero"
             self.preview_label.text = ""
             self.expression = ""
+            self.cursor_pos = 0
             self.just_calculated = False
 
         except (ValueError, SyntaxError, TypeError, OverflowError):
             self.display.text = "Math Error"
             self.preview_label.text = ""
             self.expression = ""
+            self.cursor_pos = 0
             self.just_calculated = False
 
         except Exception:
             self.display.text = "Math Error"
             self.preview_label.text = ""
             self.expression = ""
+            self.cursor_pos = 0
             self.just_calculated = False
 
     def format_number(self, number):
@@ -1738,7 +1874,7 @@ class Calculator(BoxLayout):
     def scientific_button_pressed(self, button):
         text = button.text
 
-        if text in ("DEG", "RAD"):
+        if text in ("DEG", "RAD", "GRAD"):
             self.toggle_angle_mode(button)
             return
 
@@ -1757,13 +1893,13 @@ class Calculator(BoxLayout):
 
         if text in function_tokens:
             self.reset_if_calculated()
-            self.expression += function_tokens[text]
+            self._insert_at_cursor(function_tokens[text])
             self.update_display()
             return
 
         if text in ("π", "e"):
             self.reset_if_calculated()
-            self.expression += text
+            self._insert_at_cursor(text)
             self.update_display()
             return
 
@@ -1788,11 +1924,8 @@ class Calculator(BoxLayout):
             return
 
     def toggle_angle_mode(self, button):
-        if self.engine.angle_mode == "deg":
-            self.engine.angle_mode = "rad"
-        else:
-            self.engine.angle_mode = "deg"
-
+        cycle = {"deg": "rad", "rad": "grad", "grad": "deg"}
+        self.engine.angle_mode = cycle[self.engine.angle_mode]
         button.text = self.engine.angle_mode.upper()
 
     # ------------------------------------------------------------------
@@ -1855,7 +1988,7 @@ class Calculator(BoxLayout):
 
     def memory_recall(self):
         self.reset_if_calculated()
-        self.expression += self.format_number(self.memory)
+        self._insert_at_cursor(self.format_number(self.memory))
         self.update_display()
 
     def memory_add(self):
@@ -1899,7 +2032,7 @@ class Calculator(BoxLayout):
             for i, line in enumerate(lines, start=1):
                 step_label = Label(
                     text=f"{i}. {line}",
-                    size_hint_y=None, height=dp(36),
+                    size_hint_y=None, height=dp(52),
                     font_size="14sp", halign="left", valign="middle",
                 )
                 step_label.bind(size=self.update_text_size)
@@ -1956,7 +2089,7 @@ class Calculator(BoxLayout):
 
                 def reuse(instance, answer=ans):
                     self.reset_if_calculated()
-                    self.expression += self.format_number(answer)
+                    self._insert_at_cursor(self.format_number(answer))
                     self.update_display()
 
                 def view_steps(instance, expression=expr):
@@ -2172,10 +2305,31 @@ class Calculator(BoxLayout):
                 frac_result.text = f"Error: {exc}"
                 last_steps["fraction"] = []
 
+        def to_mixed(instance):
+            try:
+                num, den = int(float(num_field.text)), int(float(den_field.text))
+                whole, rem_num, rem_den = to_mixed_number(num, den)
+                mixed_text = format_mixed_number(whole, rem_num, rem_den)
+                frac_result.text = f"= {mixed_text}"
+                if rem_num == 0:
+                    last_steps["fraction"] = [f"{num}/{den} is exactly {whole} - no remainder"]
+                else:
+                    last_steps["fraction"] = [
+                        f"Whole part: {whole}",
+                        f"Remaining fraction: {rem_num}/{rem_den}",
+                        f"So {num}/{den} = {mixed_text}",
+                    ]
+            except Exception as exc:
+                frac_result.text = f"Error: {exc}"
+                last_steps["fraction"] = []
+
         def view_fraction_steps(instance):
             self.show_steps_popup("How this was worked out", last_steps["fraction"])
 
-        self._action_row(layout, [("Simplify", simplify)])
+        self._action_row(layout, [
+            ("Simplify", simplify),
+            ("Mixed Number", to_mixed),
+        ])
         self._action_row(layout, [("View Steps", view_fraction_steps)])
 
         scroll.add_widget(layout)
@@ -2398,12 +2552,21 @@ class Calculator(BoxLayout):
                 calc_result.text = f"Error: {exc}"
                 calc_last_steps["lines"] = []
 
+        order_field = self._labeled_input(layout, "Derivative order (for Exact, e.g. 1, 2, 3)")
+        order_field.text = "1"
+
         def do_exact_derivative(instance):
             try:
-                result = symbolic_derivative(expr_field.text)
-                calc_result.text = f"f'(x) = {result}"
+                order_text = order_field.text.strip()
+                order = int(order_text) if order_text else 1
+                if order < 1:
+                    raise ValueError("Order must be 1 or higher")
+                result = symbolic_derivative(expr_field.text, order=order)
+                label = "f'(x)" if order == 1 else f"f^({order})(x)"
+                calc_result.text = f"{label} = {result}"
                 calc_last_steps["lines"] = [
-                    "Computed using symbolic algebra (sympy) - an exact "
+                    f"Computed the {order}{'st' if order==1 else 'nd' if order==2 else 'rd' if order==3 else 'th'} "
+                    "derivative using symbolic algebra (sympy) - an exact "
                     "formula, not a numerical estimate. Detailed rule-by-rule "
                     "working (power rule, chain rule, etc.) isn't shown."
                 ]
@@ -2420,7 +2583,7 @@ class Calculator(BoxLayout):
             ("limit", do_limit),
         ])
 
-        self._action_row(layout, [("Exact f'(x)", do_exact_derivative)])
+        self._action_row(layout, [("Exact f\u207f(x)", do_exact_derivative)])
         self._action_row(layout, [("View Steps", view_calc_steps)])
 
         layout.add_widget(Label(
@@ -2900,6 +3063,24 @@ class Calculator(BoxLayout):
             except Exception as exc:
                 result_label.text = f"Error: {exc}"
 
+        def overlay_derivative(instance):
+            try:
+                derivative_expr = symbolic_derivative(expr_field.text)
+                expr2_field.text = derivative_expr
+                plot()
+                result_label.text = f"Overlaid f'(x) = {derivative_expr}"
+            except Exception as exc:
+                result_label.text = f"Error: {exc}"
+
+        def overlay_integral(instance):
+            try:
+                integral_expr = symbolic_integral(expr_field.text)
+                expr2_field.text = integral_expr
+                plot()
+                result_label.text = f"Overlaid \u222bf(x)dx = {integral_expr} (with C=0)"
+            except Exception as exc:
+                result_label.text = f"Error: {exc}"
+
         self._action_row(layout, [
             ("Plot", plot),
             ("Roots", find_roots_pressed),
@@ -2911,6 +3092,22 @@ class Calculator(BoxLayout):
             ("\u25c0 Pan", pan(-1)),
             ("Pan \u25b6", pan(1)),
         ])
+        self._action_row(layout, [
+            ("Overlay f'(x)", overlay_derivative),
+            ("Overlay \u222bf(x)", overlay_integral),
+        ])
+
+        note = Label(
+            text=(
+                "Overlay buttons fill g(x) with the exact derivative or "
+                "indefinite integral (constant of integration set to 0 for "
+                "plotting) and re-plot automatically - uses symbolic math, "
+                "so it needs sympy available."
+            ),
+            size_hint_y=None, height=dp(46), font_size="11sp",
+        )
+        note.bind(size=self.update_text_size)
+        layout.add_widget(note)
 
         popup = self.make_sheet_popup("Graph", layout, height=0.9)
         popup.open()
