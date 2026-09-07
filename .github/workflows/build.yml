@@ -83,3 +83,16 @@ jobs:
         with:
           name: Mathematical-Calculator-APK
           path: bin/*.apk
+      - name: Get short commit hash
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.vars.outputs.sha_short }}
+          name: "Calculator build ${{ steps.vars.outputs.sha_short }}"
+          files: bin/*.apk
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
