@@ -2294,6 +2294,30 @@ class Calculator(BoxLayout):
     # History popup (scrollable, tap to reuse, clearable)
     # ------------------------------------------------------------------
 
+    def _make_wrapping_step_label(self, text):
+        """A Label whose height grows to fit however many lines its text
+        wraps to, instead of a fixed height that clips longer
+        explanations. Width-wrapping needs the width known first, then
+        the label's own rendered texture tells us the height it needs."""
+        label = Label(
+            text=text,
+            size_hint_y=None,
+            font_size="14sp",
+            halign="left",
+            valign="top",
+            padding=(dp(4), dp(10)),
+        )
+
+        def update_text_width(widget, width):
+            widget.text_size = (width, None)
+
+        def update_height_from_texture(widget, texture_size):
+            widget.height = texture_size[1] + dp(4)
+
+        label.bind(width=update_text_width)
+        label.bind(texture_size=update_height_from_texture)
+        return label
+
     def show_steps_popup(self, title, lines):
         scroll = ScrollView()
         steps_grid = GridLayout(
@@ -2311,13 +2335,9 @@ class Calculator(BoxLayout):
             ))
         else:
             for i, line in enumerate(lines, start=1):
-                step_label = Label(
-                    text=f"{i}. {line}",
-                    size_hint_y=None, height=dp(52),
-                    font_size="14sp", halign="left", valign="middle",
+                steps_grid.add_widget(
+                    self._make_wrapping_step_label(f"{i}. {line}")
                 )
-                step_label.bind(size=self.update_text_size)
-                steps_grid.add_widget(step_label)
 
         scroll.add_widget(steps_grid)
 
