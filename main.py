@@ -1646,10 +1646,15 @@ class Calculator(BoxLayout):
         self.memory = data.get("memory", 0)
         self.dark_mode = data.get("dark_mode", True)
         raw_history = data.get("history", [])
-        self.history = [
-            tuple(item) for item in raw_history
-            if isinstance(item, (list, tuple)) and len(item) == 2
-        ]
+        normalized = []
+        for item in raw_history:
+            if not isinstance(item, (list, tuple)):
+                continue
+            if len(item) == 2:
+                normalized.append((item[0], item[1], None))
+            elif len(item) == 3:
+                normalized.append((item[0], item[1], item[2]))
+        self.history = normalized
 
         self.update_memory_indicator()
 
@@ -1971,7 +1976,7 @@ class Calculator(BoxLayout):
             if isinstance(result, float):
                 result = round(result, 10)
 
-            self.history.append((original, result))
+            self.history.append((original, result, None))
             self.history = self.history[-50:]
 
             self.expression = self.format_number(result)
@@ -2022,13 +2027,23 @@ class Calculator(BoxLayout):
 
         return str(number)
 
-    def add_to_history(self, expression, answer):
+    def add_to_history(self, expression, answer, steps=None):
         """Records a calculation from ANY tool - not just the main
         keypad's '=' - so every popup (Number Theory, Algebra, Calculus,
         Matrices/Vectors, Conversions) shows up in History too, and
         survives an app restart the same way main-keypad calculations
-        already did."""
-        self.history.append((expression, answer))
+        already did.
+
+        steps, when given, is the exact step-by-step explanation that
+        tool already worked out - stored alongside the entry so History's
+        'Steps' button can show it directly. Without this, History could
+        only regenerate steps by re-evaluating the expression through the
+        main arithmetic engine, which has no idea how to solve
+        'GCD(12, 18)' or 'd/dx[x^2] at x=3' - so every non-arithmetic
+        entry would silently show 'No steps to show for this' even
+        though the tool that produced it explained itself perfectly well
+        the first time."""
+        self.history.append((expression, answer, steps))
         self.history = self.history[-50:]
         self.save_state()
 
@@ -2373,7 +2388,7 @@ class Calculator(BoxLayout):
                 )
                 return
 
-            for expr, ans in reversed(self.history):
+            for expr, ans, stored_steps in reversed(self.history):
                 entry_text = f"{expr} = {self.format_number(ans)}"
 
                 row = BoxLayout(
@@ -2393,7 +2408,10 @@ class Calculator(BoxLayout):
                     self._insert_at_cursor(self.format_number(answer))
                     self.update_display()
 
-                def view_steps(instance, expression=expr):
+                def view_steps(instance, expression=expr, saved_steps=stored_steps):
+                    if saved_steps:
+                        self.show_steps_popup(f"How: {expression}", saved_steps)
+                        return
                     trace = []
                     try:
                         self.engine.evaluate(expression, trace=trace)
@@ -2528,7 +2546,7 @@ class Calculator(BoxLayout):
                 verdict, steps = is_prime_steps(n)
                 n_result.text = f"{n} is {'prime' if verdict else 'not prime'}"
                 last_steps["prime"] = steps
-                self.add_to_history(f"is {n} prime?", n_result.text)
+                self.add_to_history(f"is {n} prime?", n_result.text, steps)
             except Exception as exc:
                 n_result.text = f"Error: {exc}"
                 last_steps["prime"] = []
@@ -2539,7 +2557,7 @@ class Calculator(BoxLayout):
                 factors, steps = prime_factorize_steps(n)
                 n_result.text = format_prime_factors(factors)
                 last_steps["prime"] = steps
-                self.add_to_history(f"prime factors of {n}", n_result.text)
+                self.add_to_history(f"prime factors of {n}", n_result.text, steps)
             except Exception as exc:
                 n_result.text = f"Error: {exc}"
                 last_steps["prime"] = []
@@ -2567,7 +2585,7 @@ class Calculator(BoxLayout):
                 result, steps = gcd_steps(a, b)
                 ab_result.text = f"GCD = {result}"
                 last_steps["gcd_lcm"] = steps
-                self.add_to_history(f"GCD({a}, {b})", result)
+                self.add_to_history(f"GCD({a}, {b})", result, steps)
             except Exception as exc:
                 ab_result.text = f"Error: {exc}"
                 last_steps["gcd_lcm"] = []
@@ -2578,7 +2596,7 @@ class Calculator(BoxLayout):
                 result, steps = lcm_steps(a, b)
                 ab_result.text = f"LCM = {result}"
                 last_steps["gcd_lcm"] = steps
-                self.add_to_history(f"LCM({a}, {b})", result)
+                self.add_to_history(f"LCM({a}, {b})", result, steps)
             except Exception as exc:
                 ab_result.text = f"Error: {exc}"
                 last_steps["gcd_lcm"] = []
@@ -2606,7 +2624,7 @@ class Calculator(BoxLayout):
                 (n, d), steps = simplify_fraction_steps(num, den)
                 frac_result.text = f"= {n}/{d}"
                 last_steps["fraction"] = steps
-                self.add_to_history(f"simplify {num}/{den}", f"{n}/{d}")
+                self.add_to_history(f"simplify {num}/{den}", f"{n}/{d}", steps)
             except Exception as exc:
                 frac_result.text = f"Error: {exc}"
                 last_steps["fraction"] = []
@@ -2625,7 +2643,7 @@ class Calculator(BoxLayout):
                         f"Remaining fraction: {rem_num}/{rem_den}",
                         f"So {num}/{den} = {mixed_text}",
                     ]
-                self.add_to_history(f"{num}/{den} as mixed number", mixed_text)
+                self.add_to_history(f"{num}/{den} as mixed number", mixed_text, last_steps["fraction"])
             except Exception as exc:
                 frac_result.text = f"Error: {exc}"
                 last_steps["fraction"] = []
@@ -2671,7 +2689,7 @@ class Calculator(BoxLayout):
                 x = solve_linear(self.engine, eq_field.text, steps=steps)
                 eq_result.text = f"x = {format_plain_number(x)}"
                 eq_last_steps["lines"] = steps
-                self.add_to_history(eq_field.text, eq_result.text)
+                self.add_to_history(eq_field.text, eq_result.text, steps)
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
@@ -2682,7 +2700,7 @@ class Calculator(BoxLayout):
                 roots = solve_quadratic(self.engine, eq_field.text, steps=steps)
                 eq_result.text = "x = " + ", ".join(format_plain_number(r) for r in roots)
                 eq_last_steps["lines"] = steps
-                self.add_to_history(eq_field.text, eq_result.text)
+                self.add_to_history(eq_field.text, eq_result.text, steps)
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
@@ -2708,7 +2726,7 @@ class Calculator(BoxLayout):
                     "detailed step-by-step algebra isn't available for exact "
                     "mode, but the answer is precise, not approximated."
                 ]
-                self.add_to_history(eq_field.text, eq_result.text)
+                self.add_to_history(eq_field.text, eq_result.text, eq_last_steps["lines"])
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
@@ -2778,7 +2796,7 @@ class Calculator(BoxLayout):
                 sim_result.text = f"x = {format_plain_number(x)}, y = {format_plain_number(y)}"
                 sim_last_steps["lines"] = steps
                 self.add_to_history(
-                    f"{eq1_field.text} & {eq2_field.text}", sim_result.text
+                    f"{eq1_field.text} & {eq2_field.text}", sim_result.text, steps
                 )
             except Exception as exc:
                 sim_result.text = f"Error: {exc}"
@@ -2846,7 +2864,8 @@ class Calculator(BoxLayout):
                     f"= {format_plain_number(value)}",
                 ]
                 self.add_to_history(
-                    f"d/dx[{expr_field.text}] at x={format_plain_number(x0)}", calc_result.text
+                    f"d/dx[{expr_field.text}] at x={format_plain_number(x0)}", calc_result.text,
+                    calc_last_steps["lines"],
                 )
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
@@ -2867,6 +2886,7 @@ class Calculator(BoxLayout):
                 self.add_to_history(
                     f"d\u00b2/dx\u00b2[{expr_field.text}] at x={format_plain_number(x0)}",
                     calc_result.text,
+                    calc_last_steps["lines"],
                 )
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
@@ -2887,6 +2907,7 @@ class Calculator(BoxLayout):
                 self.add_to_history(
                     f"limit of {expr_field.text} as x->{format_plain_number(x0)}",
                     calc_result.text,
+                    calc_last_steps["lines"],
                 )
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
@@ -2910,7 +2931,7 @@ class Calculator(BoxLayout):
                     "formula, not a numerical estimate. Detailed rule-by-rule "
                     "working (power rule, chain rule, etc.) isn't shown."
                 ]
-                self.add_to_history(f"{label} of {expr_field.text}", result)
+                self.add_to_history(f"{label} of {expr_field.text}", result, calc_last_steps["lines"])
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
                 calc_last_steps["lines"] = []
@@ -2953,6 +2974,7 @@ class Calculator(BoxLayout):
                     f"\u222b[{format_plain_number(a)},{format_plain_number(b)}] "
                     f"{expr_field.text} dx",
                     integral_result.text,
+                    integral_last_steps["lines"],
                 )
             except Exception as exc:
                 integral_result.text = f"Error: {exc}"
@@ -2971,7 +2993,7 @@ class Calculator(BoxLayout):
                     "Computed using symbolic algebra (sympy) - an exact "
                     "closed-form answer, not an approximation."
                 ]
-                self.add_to_history(f"\u222b {expr_field.text} dx", integral_result.text)
+                self.add_to_history(f"\u222b {expr_field.text} dx", integral_result.text, integral_last_steps["lines"])
             except Exception as exc:
                 integral_result.text = f"Error: {exc}"
                 integral_last_steps["lines"] = []
@@ -3260,6 +3282,7 @@ class Calculator(BoxLayout):
                     self.add_to_history(
                         f"{format_plain_number(value)} {state['from_unit']} to {state['to_unit']}",
                         result_label.text,
+                        state["last_steps"],
                     )
                 except Exception as exc:
                     result_label.text = f"Error: {exc}"
