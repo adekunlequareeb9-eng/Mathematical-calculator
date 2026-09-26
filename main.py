@@ -2022,6 +2022,16 @@ class Calculator(BoxLayout):
 
         return str(number)
 
+    def add_to_history(self, expression, answer):
+        """Records a calculation from ANY tool - not just the main
+        keypad's '=' - so every popup (Number Theory, Algebra, Calculus,
+        Matrices/Vectors, Conversions) shows up in History too, and
+        survives an app restart the same way main-keypad calculations
+        already did."""
+        self.history.append((expression, answer))
+        self.history = self.history[-50:]
+        self.save_state()
+
     # ------------------------------------------------------------------
     # More menu (Scientific / Memory / History)
     # ------------------------------------------------------------------
@@ -2498,6 +2508,7 @@ class Calculator(BoxLayout):
                 verdict, steps = is_prime_steps(n)
                 n_result.text = f"{n} is {'prime' if verdict else 'not prime'}"
                 last_steps["prime"] = steps
+                self.add_to_history(f"is {n} prime?", n_result.text)
             except Exception as exc:
                 n_result.text = f"Error: {exc}"
                 last_steps["prime"] = []
@@ -2508,6 +2519,7 @@ class Calculator(BoxLayout):
                 factors, steps = prime_factorize_steps(n)
                 n_result.text = format_prime_factors(factors)
                 last_steps["prime"] = steps
+                self.add_to_history(f"prime factors of {n}", n_result.text)
             except Exception as exc:
                 n_result.text = f"Error: {exc}"
                 last_steps["prime"] = []
@@ -2535,6 +2547,7 @@ class Calculator(BoxLayout):
                 result, steps = gcd_steps(a, b)
                 ab_result.text = f"GCD = {result}"
                 last_steps["gcd_lcm"] = steps
+                self.add_to_history(f"GCD({a}, {b})", result)
             except Exception as exc:
                 ab_result.text = f"Error: {exc}"
                 last_steps["gcd_lcm"] = []
@@ -2545,6 +2558,7 @@ class Calculator(BoxLayout):
                 result, steps = lcm_steps(a, b)
                 ab_result.text = f"LCM = {result}"
                 last_steps["gcd_lcm"] = steps
+                self.add_to_history(f"LCM({a}, {b})", result)
             except Exception as exc:
                 ab_result.text = f"Error: {exc}"
                 last_steps["gcd_lcm"] = []
@@ -2572,6 +2586,7 @@ class Calculator(BoxLayout):
                 (n, d), steps = simplify_fraction_steps(num, den)
                 frac_result.text = f"= {n}/{d}"
                 last_steps["fraction"] = steps
+                self.add_to_history(f"simplify {num}/{den}", f"{n}/{d}")
             except Exception as exc:
                 frac_result.text = f"Error: {exc}"
                 last_steps["fraction"] = []
@@ -2590,6 +2605,7 @@ class Calculator(BoxLayout):
                         f"Remaining fraction: {rem_num}/{rem_den}",
                         f"So {num}/{den} = {mixed_text}",
                     ]
+                self.add_to_history(f"{num}/{den} as mixed number", mixed_text)
             except Exception as exc:
                 frac_result.text = f"Error: {exc}"
                 last_steps["fraction"] = []
@@ -2635,6 +2651,7 @@ class Calculator(BoxLayout):
                 x = solve_linear(self.engine, eq_field.text, steps=steps)
                 eq_result.text = f"x = {format_plain_number(x)}"
                 eq_last_steps["lines"] = steps
+                self.add_to_history(eq_field.text, eq_result.text)
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
@@ -2645,6 +2662,7 @@ class Calculator(BoxLayout):
                 roots = solve_quadratic(self.engine, eq_field.text, steps=steps)
                 eq_result.text = "x = " + ", ".join(format_plain_number(r) for r in roots)
                 eq_last_steps["lines"] = steps
+                self.add_to_history(eq_field.text, eq_result.text)
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
@@ -2670,6 +2688,7 @@ class Calculator(BoxLayout):
                     "detailed step-by-step algebra isn't available for exact "
                     "mode, but the answer is precise, not approximated."
                 ]
+                self.add_to_history(eq_field.text, eq_result.text)
             except Exception as exc:
                 eq_result.text = f"Error: {exc}"
                 eq_last_steps["lines"] = []
@@ -2704,13 +2723,17 @@ class Calculator(BoxLayout):
 
         def do_simplify(instance):
             try:
-                simplify_result.text = "= " + symbolic_simplify(simplify_field.text)
+                result = symbolic_simplify(simplify_field.text)
+                simplify_result.text = "= " + result
+                self.add_to_history(f"simplify({simplify_field.text})", result)
             except Exception as exc:
                 simplify_result.text = f"Error: {exc}"
 
         def do_expand(instance):
             try:
-                simplify_result.text = "= " + symbolic_expand(simplify_field.text)
+                result = symbolic_expand(simplify_field.text)
+                simplify_result.text = "= " + result
+                self.add_to_history(f"expand({simplify_field.text})", result)
             except Exception as exc:
                 simplify_result.text = f"Error: {exc}"
 
@@ -2734,6 +2757,9 @@ class Calculator(BoxLayout):
                 x, y = solve_simultaneous(self.engine, eq1_field.text, eq2_field.text, steps=steps)
                 sim_result.text = f"x = {format_plain_number(x)}, y = {format_plain_number(y)}"
                 sim_last_steps["lines"] = steps
+                self.add_to_history(
+                    f"{eq1_field.text} & {eq2_field.text}", sim_result.text
+                )
             except Exception as exc:
                 sim_result.text = f"Error: {exc}"
                 sim_last_steps["lines"] = []
@@ -2799,6 +2825,9 @@ class Calculator(BoxLayout):
                     f"({format_plain_number(f_plus)} - {format_plain_number(f_minus)}) \u00f7 {2*h} "
                     f"= {format_plain_number(value)}",
                 ]
+                self.add_to_history(
+                    f"d/dx[{expr_field.text}] at x={format_plain_number(x0)}", calc_result.text
+                )
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
                 calc_last_steps["lines"] = []
@@ -2815,6 +2844,10 @@ class Calculator(BoxLayout):
                     "f''(x) \u2248 (f(x+h) - 2f(x) + f(x-h)) \u00f7 h\u00b2",
                     f"Result: {format_plain_number(value)}",
                 ]
+                self.add_to_history(
+                    f"d\u00b2/dx\u00b2[{expr_field.text}] at x={format_plain_number(x0)}",
+                    calc_result.text,
+                )
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
                 calc_last_steps["lines"] = []
@@ -2831,6 +2864,10 @@ class Calculator(BoxLayout):
                     "If both sides agree closely, that shared value is the limit",
                     f"Result: {format_plain_number(value)}",
                 ]
+                self.add_to_history(
+                    f"limit of {expr_field.text} as x->{format_plain_number(x0)}",
+                    calc_result.text,
+                )
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
                 calc_last_steps["lines"] = []
@@ -2853,6 +2890,7 @@ class Calculator(BoxLayout):
                     "formula, not a numerical estimate. Detailed rule-by-rule "
                     "working (power rule, chain rule, etc.) isn't shown."
                 ]
+                self.add_to_history(f"{label} of {expr_field.text}", result)
             except Exception as exc:
                 calc_result.text = f"Error: {exc}"
                 calc_last_steps["lines"] = []
@@ -2891,6 +2929,11 @@ class Calculator(BoxLayout):
                     "Used Simpson's rule to add up the area of each slice",
                     f"Total \u2248 {format_plain_number(value)}",
                 ]
+                self.add_to_history(
+                    f"\u222b[{format_plain_number(a)},{format_plain_number(b)}] "
+                    f"{expr_field.text} dx",
+                    integral_result.text,
+                )
             except Exception as exc:
                 integral_result.text = f"Error: {exc}"
                 integral_last_steps["lines"] = []
@@ -2908,6 +2951,7 @@ class Calculator(BoxLayout):
                     "Computed using symbolic algebra (sympy) - an exact "
                     "closed-form answer, not an approximation."
                 ]
+                self.add_to_history(f"\u222b {expr_field.text} dx", integral_result.text)
             except Exception as exc:
                 integral_result.text = f"Error: {exc}"
                 integral_last_steps["lines"] = []
@@ -2964,23 +3008,33 @@ class Calculator(BoxLayout):
             def handler(instance):
                 try:
                     a = parse_matrix(matrix_a_field.text)
+                    label = None
                     if op in ("add", "sub", "mul"):
                         b = parse_matrix(matrix_b_field.text)
                         if op == "add":
                             result = matrix_add(a, b)
+                            label = f"[{matrix_a_field.text}] + [{matrix_b_field.text}]"
                         elif op == "sub":
                             result = matrix_add(a, b, sign=-1)
+                            label = f"[{matrix_a_field.text}] - [{matrix_b_field.text}]"
                         else:
                             result = matrix_multiply(a, b)
+                            label = f"[{matrix_a_field.text}] x [{matrix_b_field.text}]"
                         matrix_result.text = format_matrix(result)
                     elif op == "det":
                         matrix_result.text = f"det(A) = {format_plain_number(matrix_determinant(a))}"
+                        label = f"det([{matrix_a_field.text}])"
                     elif op == "inv":
                         matrix_result.text = format_matrix(matrix_inverse(a))
+                        label = f"inverse([{matrix_a_field.text}])"
                     elif op == "transpose":
                         matrix_result.text = format_matrix(matrix_transpose(a))
+                        label = f"transpose([{matrix_a_field.text}])"
                     elif op == "rank":
                         matrix_result.text = f"rank(A) = {matrix_rank(a)}"
+                        label = f"rank([{matrix_a_field.text}])"
+                    if label is not None:
+                        self.add_to_history(label, matrix_result.text)
                 except Exception as exc:
                     matrix_result.text = f"Error: {exc}"
             return handler
@@ -3011,18 +3065,26 @@ class Calculator(BoxLayout):
             def handler(instance):
                 try:
                     a = parse_vector(vec_a_field.text)
+                    label = None
                     if op in ("add", "dot", "cross"):
                         b = parse_vector(vec_b_field.text)
                         if op == "add":
                             vector_result.text = format_vector(vector_add(a, b))
+                            label = f"({vec_a_field.text}) + ({vec_b_field.text})"
                         elif op == "dot":
                             vector_result.text = f"A\u00b7B = {format_plain_number(vector_dot(a, b))}"
+                            label = f"({vec_a_field.text}) \u00b7 ({vec_b_field.text})"
                         else:
                             vector_result.text = format_vector(vector_cross(a, b))
+                            label = f"({vec_a_field.text}) \u00d7 ({vec_b_field.text})"
                     elif op == "magnitude":
                         vector_result.text = f"|A| = {format_plain_number(vector_magnitude(a))}"
+                        label = f"|({vec_a_field.text})|"
                     elif op == "unit":
                         vector_result.text = format_vector(vector_unit(a))
+                        label = f"unit({vec_a_field.text})"
+                    if label is not None:
+                        self.add_to_history(label, vector_result.text)
                 except Exception as exc:
                     vector_result.text = f"Error: {exc}"
             return handler
@@ -3175,6 +3237,10 @@ class Calculator(BoxLayout):
                             f"{format_plain_number(value)} \u00d7 {format_plain_number(from_factor)} "
                             f"\u00f7 {format_plain_number(to_factor)} = {format_plain_number(converted)}",
                         ]
+                    self.add_to_history(
+                        f"{format_plain_number(value)} {state['from_unit']} to {state['to_unit']}",
+                        result_label.text,
+                    )
                 except Exception as exc:
                     result_label.text = f"Error: {exc}"
                     state["last_steps"] = []
